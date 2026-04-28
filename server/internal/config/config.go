@@ -1,0 +1,35 @@
+package config
+
+import "os"
+
+type Config struct {
+	Port        string
+	JWTSecret   string
+	StoreDriver string
+	DatabaseURL string
+	AutoMigrate bool
+	AIBaseURL   string
+	AIAPIKey    string
+	AIModel     string
+}
+
+func Load() Config {
+	return Config{
+		Port:        getEnv("PORT", "8080"),
+		JWTSecret:   getEnv("JWT_SECRET", "flashcard-dev-secret"),
+		StoreDriver: getEnv("STORE_DRIVER", "postgres"),
+		DatabaseURL: getEnv("DATABASE_URL", "postgres://flashcard:flashcard@localhost:5432/flashcard?sslmode=disable"),
+		AutoMigrate: getEnv("AUTO_MIGRATE", "true") != "false",
+		AIBaseURL:   getEnv("AI_BASE_URL", ""),
+		AIAPIKey:    getEnv("AI_API_KEY", ""),
+		AIModel:     getEnv("AI_MODEL", "gpt-4o-mini"),
+	}
+}
+
+func getEnv(key, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	return value
+}

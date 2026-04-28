@@ -1,0 +1,40 @@
+openapi: 3.0.3
+info:
+  title: Flashcard MVP API
+  version: 0.1.0
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+  /api/v1/auth/register:
+    post:
+      summary: Register user
+      responses:
+        "201":
+          description: Created
+  /api/v1/auth/login:
+    post:
+      summary: Login user
+      responses:
+        "200":
+          description: OK
+  /api/v1/decks:
+    get:
+      summary: List decks
+      responses:
+        "200":
+          description: OK
+    post:
+      summary: Create deck
+      responses:
+        "201":
+          description: Created
+  /api/v1/review/due:
+    get:
+      summary: List due cards
+      responses:
+        "200":
+          description: OK

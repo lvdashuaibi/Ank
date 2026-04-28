@@ -1,0 +1,11 @@
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.env
+.env.local
+*.log
+*.tmp
+*.swp
+
+server/.codex_tmp/

@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: flashcard-postgres
+    environment:
+      POSTGRES_DB: flashcard
+      POSTGRES_USER: flashcard
+      POSTGRES_PASSWORD: flashcard
+    ports:
+      - "5432:5432"
+    volumes:
+      - flashcard_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashcard -d flashcard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: flashcard-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  flashcard_pgdata:
