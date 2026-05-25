@@ -3,7 +3,10 @@ package service
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math"
+	"mime/multipart"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +24,11 @@ import (
 var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidReviewRating = errors.New("invalid review rating")
+)
+
+const (
+	ReviewOrderSequential = "sequential"
+	ReviewOrderRandom     = "random"
 )
 
 type AppService struct {
@@ -96,16 +104,69 @@ func (s *AppService) ParseToken(token string) (*appjwt.Claims, error) {
 	return s.jwt.Parse(token)
 }
 
+func (s *AppService) ListFolders(userID string) []model.Folder {
+	return s.store.ListFolders(userID)
+}
+
+func (s *AppService) CreateFolder(userID string, folder model.Folder) (model.Folder, error) {
+	name := strings.TrimSpace(folder.Name)
+	if name == "" {
+		return model.Folder{}, errors.New("folder name is required")
+	}
+	now := time.Now()
+	folder.ID = repository.NewID()
+	folder.UserID = userID
+	folder.Name = name
+	folder.CreatedAt = now
+	folder.UpdatedAt = now
+	if err := s.store.CreateFolder(folder); err != nil {
+		return model.Folder{}, err
+	}
+	return folder, nil
+}
+
+func (s *AppService) GetFolder(userID, folderID string) (model.Folder, error) {
+	return s.store.GetFolder(userID, folderID)
+}
+
+func (s *AppService) UpdateFolder(userID, folderID string, request model.Folder) (model.Folder, error) {
+	folder, err := s.store.GetFolder(userID, folderID)
+	if err != nil {
+		return model.Folder{}, err
+	}
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		return model.Folder{}, errors.New("folder name is required")
+	}
+	folder.Name = name
+	folder.UpdatedAt = time.Now()
+	if err := s.store.UpdateFolder(folder); err != nil {
+		return model.Folder{}, err
+	}
+	return folder, nil
+}
+
+func (s *AppService) DeleteFolder(userID, folderID string) error {
+	return s.store.DeleteFolder(userID, folderID)
+}
+
 func (s *AppService) ListDecks(userID string) []model.Deck {
 	return s.store.ListDecks(userID)
 }
 
 func (s *AppService) CreateDeck(userID string, deck model.Deck) (model.Deck, error) {
+	if deck.FolderID != "" {
+		if _, err := s.store.GetFolder(userID, deck.FolderID); err != nil {
+			return model.Deck{}, err
+		}
+	}
 	now := time.Now()
 	deck.ID = repository.NewID()
 	deck.UserID = userID
+	deck.FolderID = strings.TrimSpace(deck.FolderID)
 	deck.CreatedAt = now
 	deck.UpdatedAt = now
+	deck.ReviewOrder = normalizeReviewOrder(deck.ReviewOrder)
 	if deck.NewCardsPerDay == 0 {
 		deck.NewCardsPerDay = 20
 	}
@@ -131,6 +192,13 @@ func (s *AppService) UpdateDeck(userID, deckID string, request model.Deck) (mode
 	deck.Description = request.Description
 	deck.Color = request.Color
 	deck.Icon = request.Icon
+	deck.FolderID = strings.TrimSpace(request.FolderID)
+	if deck.FolderID != "" {
+		if _, err := s.store.GetFolder(userID, deck.FolderID); err != nil {
+			return model.Deck{}, err
+		}
+	}
+	deck.ReviewOrder = normalizeReviewOrder(request.ReviewOrder)
 	if request.NewCardsPerDay > 0 {
 		deck.NewCardsPerDay = request.NewCardsPerDay
 	}
@@ -206,6 +274,7 @@ func (s *AppService) UpdateCard(userID, cardID string, request model.Card) (mode
 	card.Back = request.Back
 	card.Tags = request.Tags
 	card.Note = request.Note
+	card.StudyEnabled = request.StudyEnabled
 	card.UpdatedAt = time.Now()
 	card.State = sanitizeFSRSState(card.State, card.UpdatedAt)
 	applyCardContentCompat(&card)
@@ -229,9 +298,9 @@ func (s *AppService) DueCards(userID, deckID string) []model.Card {
 	if deckID != "" {
 		deck, err := s.store.GetDeck(userID, deckID)
 		if err != nil {
-			return selectDueCards(cards, nil)
+			return selectDueCards(cards, nil, "", false)
 		}
-		return selectDueCards(cards, &deck)
+		return selectDueCards(cards, &deck, reviewDayKey(now), true)
 	}
 
 	decks := s.store.ListDecks(userID)
@@ -239,7 +308,7 @@ func (s *AppService) DueCards(userID, deckID string) []model.Card {
 	for _, deck := range decks {
 		deckByID[deck.ID] = deck
 	}
-	return selectDueCardsByDeck(cards, deckByID)
+	return selectDueCardsByDeck(cards, deckByID, "", false)
 }
 
 func (s *AppService) SubmitReview(userID, cardID string, rating int, durationMS int) (model.Card, error) {
@@ -322,14 +391,15 @@ func (s *AppService) SyncPush(userID string, request model.SyncPushRequest) mode
 			}
 
 			card := model.Card{
-				ClientID: firstNonEmpty(stringValue(operation.Payload["client_id"]), operation.ID),
-				Title:    stringValue(operation.Payload["title"]),
-				Content:  stringValue(operation.Payload["content"]),
-				Front:    stringValue(operation.Payload["front"]),
-				Back:     stringValue(operation.Payload["back"]),
-				Note:     stringValue(operation.Payload["note"]),
-				Tags:     stringListValue(operation.Payload["tags"]),
-				State:    fsrsStateValue(operation.Payload["state"]),
+				ClientID:     firstNonEmpty(stringValue(operation.Payload["client_id"]), operation.ID),
+				Title:        stringValue(operation.Payload["title"]),
+				Content:      stringValue(operation.Payload["content"]),
+				Front:        stringValue(operation.Payload["front"]),
+				Back:         stringValue(operation.Payload["back"]),
+				Note:         stringValue(operation.Payload["note"]),
+				Tags:         stringListValue(operation.Payload["tags"]),
+				StudyEnabled: boolValue(operation.Payload["study_enabled"]),
+				State:        fsrsStateValue(operation.Payload["state"]),
 			}
 			if _, err := s.CreateCard(userID, deckID, card); err != nil {
 				recordFailure(fmt.Sprintf("create_card failed: %v", err))
@@ -344,13 +414,14 @@ func (s *AppService) SyncPush(userID string, request model.SyncPushRequest) mode
 				continue
 			}
 			card := model.Card{
-				ClientID: firstNonEmpty(stringValue(operation.Payload["client_id"]), cardID),
-				Title:    stringValue(operation.Payload["title"]),
-				Content:  stringValue(operation.Payload["content"]),
-				Front:    stringValue(operation.Payload["front"]),
-				Back:     stringValue(operation.Payload["back"]),
-				Note:     stringValue(operation.Payload["note"]),
-				Tags:     stringListValue(operation.Payload["tags"]),
+				ClientID:     firstNonEmpty(stringValue(operation.Payload["client_id"]), cardID),
+				Title:        stringValue(operation.Payload["title"]),
+				Content:      stringValue(operation.Payload["content"]),
+				Front:        stringValue(operation.Payload["front"]),
+				Back:         stringValue(operation.Payload["back"]),
+				Note:         stringValue(operation.Payload["note"]),
+				Tags:         stringListValue(operation.Payload["tags"]),
+				StudyEnabled: boolValue(operation.Payload["study_enabled"]),
 			}
 			if _, err := s.UpdateCard(userID, cardID, card); err != nil {
 				recordFailure(fmt.Sprintf("update_card failed: %v", err))
@@ -396,6 +467,11 @@ func (s *AppService) SyncPush(userID string, request model.SyncPushRequest) mode
 }
 
 func (s *AppService) SyncPull(userID string) model.SyncPullResponse {
+	folders := s.store.ListFolders(userID)
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].CreatedAt.Before(folders[j].CreatedAt)
+	})
+
 	decks := s.store.ListDecks(userID)
 	sort.Slice(decks, func(i, j int) bool {
 		return decks[i].CreatedAt.Before(decks[j].CreatedAt)
@@ -411,6 +487,7 @@ func (s *AppService) SyncPull(userID string) model.SyncPullResponse {
 
 	now := time.Now()
 	return model.SyncPullResponse{
+		Folders:    folders,
 		Decks:      decks,
 		Cards:      sanitizeCards(cards),
 		PulledAt:   now,
@@ -474,15 +551,15 @@ func nonNegativeFiniteFloat(value float64) float64 {
 	return value
 }
 
-func selectDueCards(cards []model.Card, deck *model.Deck) []model.Card {
+func selectDueCards(cards []model.Card, deck *model.Deck, dayKey string, respectDeckOrder bool) []model.Card {
 	deckByID := map[string]model.Deck{}
 	if deck != nil {
 		deckByID[deck.ID] = *deck
 	}
-	return selectDueCardsByDeck(cards, deckByID)
+	return selectDueCardsByDeck(cards, deckByID, dayKey, respectDeckOrder)
 }
 
-func selectDueCardsByDeck(cards []model.Card, deckByID map[string]model.Deck) []model.Card {
+func selectDueCardsByDeck(cards []model.Card, deckByID map[string]model.Deck, dayKey string, respectDeckOrder bool) []model.Card {
 	grouped := make(map[string][]model.Card)
 	for _, card := range cards {
 		grouped[card.DeckID] = append(grouped[card.DeckID], card)
@@ -495,28 +572,35 @@ func selectDueCardsByDeck(cards []model.Card, deckByID map[string]model.Deck) []
 	for deckID, deckCards := range grouped {
 		deck, ok := deckByID[deckID]
 		if !ok {
-			deck = model.Deck{ID: deckID, NewCardsPerDay: 20, MaxReviewsPerDay: 200}
+			deck = model.Deck{
+				ID:               deckID,
+				ReviewOrder:      ReviewOrderSequential,
+				NewCardsPerDay:   20,
+				MaxReviewsPerDay: 200,
+			}
 		}
-		selectedLearning, selectedReview, selectedNew := selectDeckQueue(deckCards, deck)
+		selectedLearning, selectedReview, selectedNew := selectDeckQueue(deckCards, deck, dayKey, respectDeckOrder)
 		learningCards = append(learningCards, selectedLearning...)
 		reviewCards = append(reviewCards, selectedReview...)
 		newCards = append(newCards, selectedNew...)
 	}
 
-	sort.Slice(learningCards, func(i, j int) bool {
-		return compareReviewCards(learningCards[i], learningCards[j]) < 0
-	})
-	sort.Slice(reviewCards, func(i, j int) bool {
-		return compareReviewCards(reviewCards[i], reviewCards[j]) < 0
-	})
-	sort.Slice(newCards, func(i, j int) bool {
-		return compareNewCards(newCards[i], newCards[j]) < 0
-	})
+	if !respectDeckOrder {
+		sort.Slice(learningCards, func(i, j int) bool {
+			return compareReviewCards(learningCards[i], learningCards[j]) < 0
+		})
+		sort.Slice(reviewCards, func(i, j int) bool {
+			return compareReviewCards(reviewCards[i], reviewCards[j]) < 0
+		})
+		sort.Slice(newCards, func(i, j int) bool {
+			return compareNewCards(newCards[i], newCards[j]) < 0
+		})
+	}
 
 	return append(append(learningCards, reviewCards...), newCards...)
 }
 
-func selectDeckQueue(cards []model.Card, deck model.Deck) ([]model.Card, []model.Card, []model.Card) {
+func selectDeckQueue(cards []model.Card, deck model.Deck, dayKey string, respectDeckOrder bool) ([]model.Card, []model.Card, []model.Card) {
 	learningCards := make([]model.Card, 0)
 	reviewCards := make([]model.Card, 0)
 	newCards := make([]model.Card, 0)
@@ -532,15 +616,21 @@ func selectDeckQueue(cards []model.Card, deck model.Deck) ([]model.Card, []model
 		}
 	}
 
-	sort.Slice(learningCards, func(i, j int) bool {
-		return compareReviewCards(learningCards[i], learningCards[j]) < 0
-	})
-	sort.Slice(reviewCards, func(i, j int) bool {
-		return compareReviewCards(reviewCards[i], reviewCards[j]) < 0
-	})
-	sort.Slice(newCards, func(i, j int) bool {
-		return compareNewCards(newCards[i], newCards[j]) < 0
-	})
+	if respectDeckOrder && normalizeReviewOrder(deck.ReviewOrder) == ReviewOrderRandom {
+		sortCardsByStableRandom(learningCards, deck.ID, dayKey, "learning")
+		sortCardsByStableRandom(reviewCards, deck.ID, dayKey, "review")
+		sortCardsByStableRandom(newCards, deck.ID, dayKey, "new")
+	} else {
+		sort.Slice(learningCards, func(i, j int) bool {
+			return compareReviewCards(learningCards[i], learningCards[j]) < 0
+		})
+		sort.Slice(reviewCards, func(i, j int) bool {
+			return compareReviewCards(reviewCards[i], reviewCards[j]) < 0
+		})
+		sort.Slice(newCards, func(i, j int) bool {
+			return compareNewCards(newCards[i], newCards[j]) < 0
+		})
+	}
 
 	maxReviewsPerDay := deck.MaxReviewsPerDay
 	if maxReviewsPerDay < 0 {
@@ -599,6 +689,39 @@ func compareNewCards(left, right model.Card) int {
 		return 1
 	}
 	return strings.Compare(left.ID, right.ID)
+}
+
+func reviewDayKey(value time.Time) string {
+	local := value.Local()
+	return local.Format("2006-01-02")
+}
+
+func normalizeReviewOrder(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ReviewOrderRandom:
+		return ReviewOrderRandom
+	default:
+		return ReviewOrderSequential
+	}
+}
+
+func sortCardsByStableRandom(cards []model.Card, deckID, dayKey, group string) {
+	sort.Slice(cards, func(i, j int) bool {
+		return stableReviewOrderValue(deckID, dayKey, group, cards[i].ID) <
+			stableReviewOrderValue(deckID, dayKey, group, cards[j].ID)
+	})
+}
+
+func stableReviewOrderValue(deckID, dayKey, group, cardID string) uint64 {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(deckID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(dayKey))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(group))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(cardID))
+	return hash.Sum64()
 }
 
 func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGenerateResponse {
@@ -663,16 +786,115 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 		prompt := fmt.Sprintf(template.front, topic)
 		answer := fmt.Sprintf(template.back, topic, answerContext)
 		items = append(items, model.AIGeneratedCard{
-			Title:   prompt,
-			Content: composeCardContent(prompt, answer),
-			Front:   prompt,
-			Back:    answer,
-			Tags:    []string{"AI生成", topic, difficulty},
-			Note:    template.note,
+			Title:          prompt,
+			Content:        composeCardContent(prompt, answer),
+			Front:          prompt,
+			Back:           answer,
+			CardType:       "basic",
+			KnowledgePoint: topic,
+			SourceExcerpt:  previewText(answerContext, 160),
+			Difficulty:     difficulty,
+			Tags:           []string{"AI生成", topic, difficulty},
+			Note:           template.note,
 		})
 	}
 
 	return model.AIGenerateResponse{Items: items}
+}
+
+func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, doc extractedDocument) model.AIGenerateResponse {
+	request.Context = doc.Text
+	if strings.TrimSpace(request.Topic) == "" {
+		request.Topic = strings.TrimSuffix(doc.Title, filepath.Ext(doc.Title))
+	}
+	request.SourceName = doc.Title
+	if strings.TrimSpace(request.Strategy) == "" {
+		request.Strategy = "fsrs_friendly"
+	}
+	response := s.GenerateCards(request)
+	response.Document = &model.AIDocumentSummary{
+		Title:       doc.Title,
+		MimeType:    doc.MimeType,
+		TextPreview: doc.TextPreview,
+		TextLength:  doc.TextLength,
+		PageCount:   doc.PageCount,
+	}
+	return response
+}
+
+func (s *AppService) GenerateCardsFromUpload(request model.AIGenerateRequest, header *multipart.FileHeader) (model.AIGenerateResponse, error) {
+	doc, err := extractDocumentFromUpload(header)
+	if err != nil {
+		return model.AIGenerateResponse{}, err
+	}
+	return s.GenerateCardsFromDocument(request, doc), nil
+}
+
+func (s *AppService) RewriteCardWithAI(request model.AIRewriteCardRequest) model.AIRewriteCardResponse {
+	if hasExternalAIConfig(s.config) {
+		if candidates, err := s.tryRewriteCardWithExternalAI(request); err == nil && len(candidates) > 0 {
+			return model.AIRewriteCardResponse{Candidates: candidates}
+		}
+	}
+
+	title := strings.TrimSpace(request.Title)
+	content := strings.TrimSpace(request.Content)
+	prompt, answer := splitCardContent(content)
+	if title == "" {
+		title = firstLine(prompt)
+	}
+	if title == "" {
+		title = "AI 优化卡片"
+	}
+	rewriteType := strings.TrimSpace(request.RewriteType)
+	instruction := strings.TrimSpace(request.Instruction)
+	if instruction == "" {
+		instruction = "让卡片更适合背诵"
+	}
+
+	nextPrompt := prompt
+	nextAnswer := answer
+	changeSummary := "优化题干和答案，使其更聚焦、可判定。"
+	switch rewriteType {
+	case "simplify_answer":
+		nextAnswer = firstLine(answer)
+		if nextAnswer == "" {
+			nextAnswer = answer
+		}
+		changeSummary = "压缩答案长度，减少一次复习中的记忆负担。"
+	case "make_cloze":
+		keyword := firstLine(answer)
+		if keyword == "" {
+			keyword = firstLine(prompt)
+		}
+		nextPrompt = strings.TrimSpace(prompt)
+		if keyword != "" && !strings.Contains(nextPrompt, "{{") {
+			nextPrompt = fmt.Sprintf("%s\n\n填空：{{%s}}", nextPrompt, keyword)
+		}
+		changeSummary = "改写为填空题，适合检查关键术语是否能主动回忆。"
+	case "make_choice":
+		nextPrompt = strings.TrimSpace(prompt) + "\n\n{single-choice}\n? " + firstLine(prompt) + "\n* 正确： " + firstLine(answer) + "\n- 干扰项： 相近但不准确的说法\n{/single-choice}"
+		changeSummary = "改写为单选题草稿，保留正确答案并提示后续补充干扰项。"
+	case "split":
+		changeSummary = "建议拆分为多张原子卡；当前候选保留原卡并压缩表达。"
+	default:
+		nextPrompt = strings.TrimSuffix(strings.TrimSpace(prompt), "？") + "？"
+	}
+	nextContent := composeCardContent(nextPrompt, nextAnswer)
+	return model.AIRewriteCardResponse{
+		Candidates: []model.AIRewriteCandidate{
+			{
+				Title:         firstNonEmpty(firstLine(nextPrompt), title),
+				Content:       nextContent,
+				ChangeSummary: changeSummary,
+				QualityNotes: []string{
+					"一卡一知识点",
+					"答案尽量短且可自评",
+					"保存后仍由服务端 FSRS 按真实复习表现排期",
+				},
+			},
+		},
+	}
 }
 
 func stringValue(value any) string {
@@ -793,6 +1015,25 @@ func intValue(value any) int {
 		return int(typed)
 	default:
 		return 0
+	}
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	case int:
+		return typed != 0
+	case int32:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case float64:
+		return typed != 0
+	default:
+		return false
 	}
 }
 

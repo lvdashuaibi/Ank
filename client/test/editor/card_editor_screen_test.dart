@@ -46,6 +46,7 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('填空'), findsOneWidget);
+    expect(find.text('高亮'), findsOneWidget);
     expect(find.text('单选'), findsOneWidget);
     expect(find.text('多选'), findsOneWidget);
   });

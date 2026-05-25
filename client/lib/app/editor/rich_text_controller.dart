@@ -97,6 +97,60 @@ class EditorRichTextController extends TextEditingController {
   }
 }
 
+List<InlineStyleSpan> applyInlineStyleToRange({
+  required List<InlineStyleSpan> spans,
+  required int start,
+  required int end,
+  required InlineStyle style,
+}) {
+  final int selectionStart = start < end ? start : end;
+  final int selectionEnd = start < end ? end : start;
+  if (selectionStart >= selectionEnd) {
+    return List<InlineStyleSpan>.from(spans);
+  }
+
+  final Set<InlineStyle> conflictingStyles = _conflictingInlineStyles(style);
+  final bool shouldToggleOff = _rangeFullyCoveredByStyle(
+    spans: spans,
+    start: selectionStart,
+    end: selectionEnd,
+    style: style,
+  );
+
+  final List<InlineStyleSpan> next = <InlineStyleSpan>[];
+  for (final InlineStyleSpan span in spans) {
+    final bool overlaps =
+        selectionStart < span.end && selectionEnd > span.start;
+    final bool hasStyleConflict = conflictingStyles.contains(span.style);
+    if (!overlaps || !hasStyleConflict) {
+      next.add(span);
+      continue;
+    }
+
+    if (span.start < selectionStart) {
+      next.add(
+        InlineStyleSpan(
+          start: span.start,
+          end: selectionStart,
+          style: span.style,
+        ),
+      );
+    }
+    if (span.end > selectionEnd) {
+      next.add(
+        InlineStyleSpan(start: selectionEnd, end: span.end, style: span.style),
+      );
+    }
+  }
+
+  if (!shouldToggleOff) {
+    next.add(
+      InlineStyleSpan(start: selectionStart, end: selectionEnd, style: style),
+    );
+  }
+  return next;
+}
+
 class InlineStyleSegment {
   const InlineStyleSegment({
     required this.start,
@@ -197,6 +251,69 @@ TextDecoration _mergeDecoration(TextDecoration? current, TextDecoration next) {
     return next;
   }
   return TextDecoration.combine(<TextDecoration>[current, next]);
+}
+
+Set<InlineStyle> _conflictingInlineStyles(InlineStyle style) {
+  switch (style) {
+    case InlineStyle.fontSmall:
+    case InlineStyle.fontLarge:
+      return const <InlineStyle>{InlineStyle.fontSmall, InlineStyle.fontLarge};
+    case InlineStyle.bold:
+    case InlineStyle.italic:
+    case InlineStyle.code:
+    case InlineStyle.strike:
+    case InlineStyle.highlight:
+    case InlineStyle.underline:
+    case InlineStyle.cloze:
+      return <InlineStyle>{style};
+  }
+}
+
+bool _rangeFullyCoveredByStyle({
+  required List<InlineStyleSpan> spans,
+  required int start,
+  required int end,
+  required InlineStyle style,
+}) {
+  final List<InlineStyleSpan> matches =
+      spans
+          .where(
+            (InlineStyleSpan span) =>
+                span.style == style && start < span.end && end > span.start,
+          )
+          .map(
+            (InlineStyleSpan span) => InlineStyleSpan(
+              start: span.start < start ? start : span.start,
+              end: span.end > end ? end : span.end,
+              style: span.style,
+            ),
+          )
+          .toList()
+        ..sort((InlineStyleSpan left, InlineStyleSpan right) {
+          final int startCompare = left.start.compareTo(right.start);
+          if (startCompare != 0) {
+            return startCompare;
+          }
+          return left.end.compareTo(right.end);
+        });
+
+  if (matches.isEmpty) {
+    return false;
+  }
+
+  int coveredUntil = start;
+  for (final InlineStyleSpan span in matches) {
+    if (span.start > coveredUntil) {
+      return false;
+    }
+    if (span.end > coveredUntil) {
+      coveredUntil = span.end;
+    }
+    if (coveredUntil >= end) {
+      return true;
+    }
+  }
+  return coveredUntil >= end;
 }
 
 List<InlineStyleSpan> shiftInlineStyleSpansForTextEdit({

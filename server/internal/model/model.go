@@ -10,13 +10,23 @@ type User struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type Folder struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type Deck struct {
 	ID               string    `json:"id"`
 	UserID           string    `json:"user_id"`
+	FolderID         string    `json:"folder_id,omitempty"`
 	Name             string    `json:"name"`
 	Description      string    `json:"description"`
 	Color            string    `json:"color"`
 	Icon             string    `json:"icon"`
+	ReviewOrder      string    `json:"review_order"`
 	NewCardsPerDay   int       `json:"new_cards_per_day"`
 	MaxReviewsPerDay int       `json:"max_reviews_per_day"`
 	CreatedAt        time.Time `json:"created_at"`
@@ -37,20 +47,21 @@ type FSRSState struct {
 }
 
 type Card struct {
-	ID        string    `json:"id"`
-	ClientID  string    `json:"client_id"`
-	DeckID    string    `json:"deck_id"`
-	UserID    string    `json:"user_id"`
-	Title     string    `json:"title"`
-	Content   string    `json:"content"`
-	Front     string    `json:"front"`
-	Back      string    `json:"back"`
-	Tags      []string  `json:"tags"`
-	Note      string    `json:"note"`
-	Source    string    `json:"source"`
-	State     FSRSState `json:"state"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	ClientID     string    `json:"client_id"`
+	DeckID       string    `json:"deck_id"`
+	UserID       string    `json:"user_id"`
+	Title        string    `json:"title"`
+	Content      string    `json:"content"`
+	Front        string    `json:"front"`
+	Back         string    `json:"back"`
+	Tags         []string  `json:"tags"`
+	Note         string    `json:"note"`
+	Source       string    `json:"source"`
+	StudyEnabled bool      `json:"study_enabled"`
+	State        FSRSState `json:"state"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type ReviewLog struct {
@@ -90,6 +101,7 @@ type SyncPushResponse struct {
 }
 
 type SyncPullResponse struct {
+	Folders    []Folder  `json:"folders"`
 	Decks      []Deck    `json:"decks"`
 	Cards      []Card    `json:"cards"`
 	PulledAt   time.Time `json:"pulled_at"`
@@ -97,21 +109,57 @@ type SyncPullResponse struct {
 }
 
 type AIGenerateRequest struct {
-	Topic      string `json:"topic"`
-	Context    string `json:"context"`
-	CardCount  int    `json:"card_count"`
-	Difficulty string `json:"difficulty"`
+	Topic      string   `json:"topic"`
+	Context    string   `json:"context"`
+	CardCount  int      `json:"card_count"`
+	Difficulty string   `json:"difficulty"`
+	CardTypes  []string `json:"card_types,omitempty"`
+	Strategy   string   `json:"strategy,omitempty"`
+	SourceName string   `json:"source_name,omitempty"`
 }
 
 type AIGeneratedCard struct {
-	Title   string   `json:"title"`
-	Content string   `json:"content"`
-	Front   string   `json:"front"`
-	Back    string   `json:"back"`
-	Tags    []string `json:"tags"`
-	Note    string   `json:"note"`
+	Title          string   `json:"title"`
+	Content        string   `json:"content"`
+	Front          string   `json:"front"`
+	Back           string   `json:"back"`
+	CardType       string   `json:"card_type,omitempty"`
+	KnowledgePoint string   `json:"knowledge_point,omitempty"`
+	SourceExcerpt  string   `json:"source_excerpt,omitempty"`
+	SourceLocation string   `json:"source_location,omitempty"`
+	Difficulty     string   `json:"difficulty,omitempty"`
+	Tags           []string `json:"tags"`
+	Note           string   `json:"note"`
+}
+
+type AIDocumentSummary struct {
+	Title       string `json:"title"`
+	MimeType    string `json:"mime_type"`
+	TextPreview string `json:"text_preview"`
+	TextLength  int    `json:"text_length"`
+	PageCount   int    `json:"page_count,omitempty"`
 }
 
 type AIGenerateResponse struct {
-	Items []AIGeneratedCard `json:"items"`
+	Document *AIDocumentSummary `json:"document,omitempty"`
+	Items    []AIGeneratedCard  `json:"items"`
+}
+
+type AIRewriteCardRequest struct {
+	CardID      string `json:"card_id,omitempty"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	Instruction string `json:"instruction"`
+	RewriteType string `json:"rewrite_type"`
+}
+
+type AIRewriteCandidate struct {
+	Title         string   `json:"title"`
+	Content       string   `json:"content"`
+	ChangeSummary string   `json:"change_summary"`
+	QualityNotes  []string `json:"quality_notes"`
+}
+
+type AIRewriteCardResponse struct {
+	Candidates []AIRewriteCandidate `json:"candidates"`
 }

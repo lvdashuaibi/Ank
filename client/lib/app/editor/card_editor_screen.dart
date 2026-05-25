@@ -43,6 +43,7 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
   static const String _multiChoiceStartMarker = '{multi-choice}';
   static const String _multiChoiceEndMarker = '{/multi-choice}';
   bool _initialized = false;
+  bool _studyEnabled = true;
   late final TextEditingController _titleController;
   late final FocusNode _titleFocusNode;
   final List<_BodyFlowNode> _bodyNodes = <_BodyFlowNode>[];
@@ -78,7 +79,17 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
 
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      appBar: AppBar(title: Text(widget.cardId == null ? '创建卡片' : '编辑卡片')),
+      appBar: AppBar(
+        title: Text(widget.cardId == null ? '创建卡片' : '编辑卡片'),
+        actions: <Widget>[
+          if (widget.cardId != null)
+            IconButton(
+              onPressed: state.syncInProgress ? null : _openAIRewriteSheet,
+              icon: const Icon(Icons.auto_fix_high_outlined),
+              tooltip: 'AI 优化卡片',
+            ),
+        ],
+      ),
       body: SafeArea(
         child: LayoutBuilder(
           builder: (BuildContext context, BoxConstraints constraints) {
@@ -110,6 +121,19 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
                               ),
                             ),
                           ),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _StudyToggleCard(
+                            value: _studyEnabled,
+                            reviewOrder:
+                                deck?.reviewOrder ?? DeckReviewOrder.sequential,
+                            onChanged: (bool value) {
+                              setState(() {
+                                _studyEnabled = value;
+                              });
+                            },
+                          ),
+                        ),
                         Expanded(child: _buildEditorSurface(theme)),
                       ],
                     ),
@@ -207,6 +231,7 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
           _SimpleToolbar(
             onToggleCloze: _toggleClozeAtSelection,
             onBold: () => _applyInlineStyle(InlineStyle.bold),
+            onHighlight: () => _applyInlineStyle(InlineStyle.highlight),
             onUnderline: () => _applyInlineStyle(InlineStyle.underline),
             onFontDown: () => _applyInlineStyle(InlineStyle.fontSmall),
             onFontUp: () => _applyInlineStyle(InlineStyle.fontLarge),
@@ -413,6 +438,7 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
     }
     if (widget.cardId == null) {
       _titleController.text = '';
+      _studyEnabled = true;
       _resetBodyNodes(<_BodyFlowNode>[_createTextNode(EditorRichText.empty)]);
       _initialized = true;
       return;
@@ -434,6 +460,7 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
           )
         : _seedFromCard(currentCard, parts);
     _titleController.text = seed.title;
+    _studyEnabled = currentCard?.studyEnabled ?? false;
     _resetBodyNodes(
       _buildDocumentNodes(
         prompt: seed.body,
@@ -480,15 +507,9 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
 
   /// Save prompt + answer content back to the existing card schema.
   Future<void> _saveCard() async {
-    final String title = _titleController.text.trim();
-    final _DocumentSections sections = _documentSections;
-    final String body = sections.prompt;
-    final String answer = sections.answer;
-    final String content = CardDocumentCodec.compose(
-      prompt: title.isEmpty ? body : '$title\n\n$body'.trim(),
-      answer: answer,
-      includeAnswerLine: sections.hasAnswerLine,
-    );
+    final _CurrentEditorContent current = _currentEditorContent();
+    final String title = current.title;
+    final String content = current.content;
     if (content.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -505,6 +526,7 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
             content: content,
             note: '',
             tags: const <String>['dsl'],
+            studyEnabled: _studyEnabled,
           )
         : await store.updateCard(
             cardId: widget.cardId!,
@@ -512,11 +534,61 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
             content: content,
             note: '',
             tags: const <String>['dsl'],
+            studyEnabled: _studyEnabled,
           );
 
     if (mounted && success) {
       Navigator.of(context).pop();
     }
+  }
+
+  _CurrentEditorContent _currentEditorContent() {
+    final String title = _titleController.text.trim();
+    final _DocumentSections sections = _documentSections;
+    final String body = sections.prompt;
+    final String answer = sections.answer;
+    final String content = CardDocumentCodec.compose(
+      prompt: title.isEmpty ? body : '$title\n\n$body'.trim(),
+      answer: answer,
+      includeAnswerLine: sections.hasAnswerLine,
+    );
+    return _CurrentEditorContent(title: title, content: content);
+  }
+
+  Future<void> _openAIRewriteSheet() async {
+    final _CurrentEditorContent current = _currentEditorContent();
+    final AIRewriteCandidate? candidate =
+        await showModalBottomSheet<AIRewriteCandidate>(
+          context: context,
+          isScrollControlled: true,
+          builder: (BuildContext context) {
+            return _AIRewriteCardSheet(
+              cardId: widget.cardId,
+              title: current.title,
+              content: current.content,
+            );
+          },
+        );
+    if (candidate == null || !mounted) {
+      return;
+    }
+    _applyAIRewriteCandidate(candidate);
+  }
+
+  void _applyAIRewriteCandidate(AIRewriteCandidate candidate) {
+    final CardDocumentParts parts = CardDocumentCodec.parse(candidate.content);
+    final String title = candidate.title.trim().isEmpty
+        ? (firstNonEmptyLine(parts.prompt) ?? '')
+        : candidate.title.trim();
+    _titleController.text = title;
+    _resetBodyNodes(
+      _buildDocumentNodes(
+        prompt: _stripLeadingTitle(parts.prompt, title),
+        answer: parts.answer,
+        hasAnswerLine: parts.hasAnswerLine || parts.answer.trim().isNotEmpty,
+      ),
+    );
+    _handleEditorChanged();
   }
 
   /// Apply a visual inline style directly to the selected text.
@@ -545,9 +617,12 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
       return;
     }
 
-    final List<InlineStyleSpan> spans = List<InlineStyleSpan>.from(
-      node.controller.model.spans,
-    )..add(InlineStyleSpan(start: start, end: end, style: style));
+    final List<InlineStyleSpan> spans = applyInlineStyleToRange(
+      spans: node.controller.model.spans,
+      start: start,
+      end: end,
+      style: style,
+    );
     node.controller.setSpans(spans, notify: true);
     node.focusNode.requestFocus();
     setState(() {});
@@ -1519,6 +1594,13 @@ class _EditorSeed {
   final bool hasAnswerLine;
 }
 
+class _CurrentEditorContent {
+  const _CurrentEditorContent({required this.title, required this.content});
+
+  final String title;
+  final String content;
+}
+
 class _DocumentSections {
   const _DocumentSections({
     required this.prompt,
@@ -1529,6 +1611,239 @@ class _DocumentSections {
   final String prompt;
   final String answer;
   final bool hasAnswerLine;
+}
+
+class _AIRewriteCardSheet extends ConsumerStatefulWidget {
+  const _AIRewriteCardSheet({
+    required this.cardId,
+    required this.title,
+    required this.content,
+  });
+
+  final String? cardId;
+  final String title;
+  final String content;
+
+  @override
+  ConsumerState<_AIRewriteCardSheet> createState() =>
+      _AIRewriteCardSheetState();
+}
+
+class _AIRewriteCardSheetState extends ConsumerState<_AIRewriteCardSheet> {
+  final TextEditingController _instructionController = TextEditingController();
+  String _rewriteType = 'improve';
+  List<AIRewriteCandidate> _candidates = const <AIRewriteCandidate>[];
+
+  @override
+  void dispose() {
+    _instructionController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppState state = ref.watch(appStoreProvider);
+    final ThemeData theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+          top: 16,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      'AI 优化卡片',
+                      style: theme.textTheme.headlineSmall,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: state.syncInProgress
+                        ? null
+                        : () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                    tooltip: '关闭',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: _rewriteType,
+                decoration: const InputDecoration(labelText: '优化方式'),
+                items: const <DropdownMenuItem<String>>[
+                  DropdownMenuItem<String>(
+                    value: 'improve',
+                    child: Text('优化表达'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'simplify_answer',
+                    child: Text('简化答案'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'make_cloze',
+                    child: Text('改成填空题'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'make_choice',
+                    child: Text('改成选择题'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'split',
+                    child: Text('拆成原子卡建议'),
+                  ),
+                ],
+                onChanged: state.syncInProgress
+                    ? null
+                    : (String? value) {
+                        if (value == null) return;
+                        setState(() => _rewriteType = value);
+                      },
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _instructionController,
+                minLines: 2,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: '补充要求（可选）',
+                  hintText: '例如：更适合考试，或把答案压到一句话。',
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: state.syncInProgress ? null : _rewrite,
+                icon: state.syncInProgress
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.auto_fix_high_outlined),
+                label: Text(state.syncInProgress ? '优化中…' : '生成优化方案'),
+              ),
+              if (state.errorMessage != null) ...<Widget>[
+                const SizedBox(height: 12),
+                Text(
+                  state.errorMessage!,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              ],
+              for (final AIRewriteCandidate candidate
+                  in _candidates) ...<Widget>[
+                const SizedBox(height: 12),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          candidate.title.isEmpty ? '优化候选' : candidate.title,
+                          style: theme.textTheme.titleSmall,
+                        ),
+                        if (candidate.changeSummary.isNotEmpty) ...<Widget>[
+                          const SizedBox(height: 6),
+                          Text(
+                            candidate.changeSummary,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 10),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: FilledButton(
+                            onPressed: () =>
+                                Navigator.of(context).pop(candidate),
+                            child: const Text('应用这个版本'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _rewrite() async {
+    final List<AIRewriteCandidate> candidates = await ref
+        .read(appStoreProvider.notifier)
+        .rewriteCardWithAI(
+          cardId: widget.cardId,
+          title: widget.title,
+          content: widget.content,
+          rewriteType: _rewriteType,
+          instruction: _instructionController.text.trim(),
+        );
+    if (!mounted) {
+      return;
+    }
+    setState(() => _candidates = candidates);
+  }
+}
+
+class _StudyToggleCard extends StatelessWidget {
+  const _StudyToggleCard({
+    required this.value,
+    required this.reviewOrder,
+    required this.onChanged,
+  });
+
+  final bool value;
+  final DeckReviewOrder reviewOrder;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text('加入背诵', style: theme.textTheme.titleSmall),
+                const SizedBox(height: 4),
+                Text(
+                  value
+                      ? '这张卡会进入当前牌组的${reviewOrder.label}复习队列。'
+                      : '默认只保存内容，不会自动进入复习列表。',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Switch.adaptive(value: value, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
 }
 
 class _InlineAnswerLineMarker extends StatelessWidget {
@@ -1552,6 +1867,7 @@ class _SimpleToolbar extends StatelessWidget {
   const _SimpleToolbar({
     required this.onToggleCloze,
     required this.onBold,
+    required this.onHighlight,
     required this.onUnderline,
     required this.onFontUp,
     required this.onFontDown,
@@ -1563,6 +1879,7 @@ class _SimpleToolbar extends StatelessWidget {
 
   final VoidCallback onToggleCloze;
   final VoidCallback onBold;
+  final VoidCallback onHighlight;
   final VoidCallback onUnderline;
   final VoidCallback onFontUp;
   final VoidCallback onFontDown;
@@ -1595,6 +1912,12 @@ class _SimpleToolbar extends StatelessWidget {
             icon: Icons.format_bold_rounded,
             label: '加粗',
             onTap: onBold,
+          ),
+          _ToolbarButton(
+            tooltip: '荧光笔高亮',
+            icon: Icons.highlight_alt_rounded,
+            label: '高亮',
+            onTap: onHighlight,
           ),
           _ToolbarButton(
             tooltip: '下划线',

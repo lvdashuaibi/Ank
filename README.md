@@ -2,8 +2,8 @@
 
 双端闪卡项目，当前仓库同时包含：
 
-- `client/`：Flutter 客户端，支持登录、牌组浏览、创建卡片、复习、离线待同步队列、AI 草稿生成
-- `server/`：Go 后端，支持鉴权、牌组/卡片/复习 API、PostgreSQL 存储、同步接口、AI 生成接口
+- `client/`：Flutter 客户端，支持登录、牌组浏览、创建卡片、联网复习、内容编辑待同步队列、AI 草稿生成
+- `server/`：Go 后端，支持鉴权、牌组/卡片/复习 API、官方 FSRS 调度、PostgreSQL 存储、同步接口、AI 生成接口
 
 ## 快速启动
 
@@ -41,7 +41,8 @@ http://127.0.0.1:3100/
 - 正式登录/注册
 - PostgreSQL 持久化
 - Sync push/pull
-- 客户端离线操作队列
+- 客户端内容编辑待同步队列
+- 服务端官方 FSRS 复习调度，评分需联网提交
 - 卡片搜索筛选
 - AI 规则式卡片草稿生成
 - iOS Simulator / macOS / Web 联调

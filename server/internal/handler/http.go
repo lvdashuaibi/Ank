@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -70,6 +71,50 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 	})
 
 	protected := api.Group("", authMiddleware(services))
+	protected.GET("/folders", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"items": services.ListFolders(userIDFromContext(c))})
+	})
+	protected.POST("/folders", func(c *gin.Context) {
+		var request model.Folder
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		folder, err := services.CreateFolder(userIDFromContext(c), request)
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, folder)
+	})
+	protected.GET("/folders/:id", func(c *gin.Context) {
+		folder, err := services.GetFolder(userIDFromContext(c), c.Param("id"))
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, folder)
+	})
+	protected.PUT("/folders/:id", func(c *gin.Context) {
+		var request model.Folder
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		folder, err := services.UpdateFolder(userIDFromContext(c), c.Param("id"), request)
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, folder)
+	})
+	protected.DELETE("/folders/:id", func(c *gin.Context) {
+		if err := services.DeleteFolder(userIDFromContext(c), c.Param("id")); err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
 	protected.GET("/decks", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"items": services.ListDecks(userIDFromContext(c))})
 	})
@@ -201,8 +246,49 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 		}
 		c.JSON(http.StatusOK, services.GenerateCards(request))
 	})
+	protected.POST("/ai/import-file", func(c *gin.Context) {
+		file, err := c.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing file"})
+			return
+		}
+		cardCount, _ := strconv.Atoi(c.PostForm("card_count"))
+		request := model.AIGenerateRequest{
+			Topic:      c.PostForm("topic"),
+			CardCount:  cardCount,
+			Difficulty: c.PostForm("difficulty"),
+			Strategy:   c.PostForm("strategy"),
+			CardTypes:  splitCSV(c.PostForm("card_types")),
+		}
+		response, err := services.GenerateCardsFromUpload(request, file)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, response)
+	})
+	protected.POST("/ai/rewrite-card", func(c *gin.Context) {
+		var request model.AIRewriteCardRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, services.RewriteCardWithAI(request))
+	})
 
 	return router
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func requestLogger(logger *zap.Logger) gin.HandlerFunc {

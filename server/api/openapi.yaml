@@ -1,40 +1,1239 @@
 openapi: 3.0.3
 info:
   title: Flashcard MVP API
-  version: 0.1.0
+  version: 0.2.0
+  description: |
+    Ank Flashcard API，支持认证、文件夹、牌组、卡片、复习、同步与 AI 生成功能。
+servers:
+  - url: /
+tags:
+  - name: system
+  - name: auth
+  - name: folders
+  - name: decks
+  - name: cards
+  - name: review
+  - name: sync
+  - name: ai
 paths:
   /healthz:
     get:
+      tags: [system]
       summary: Health check
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
   /api/v1/auth/register:
     post:
+      tags: [auth]
       summary: Register user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
       responses:
         "201":
           description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/v1/auth/login:
     post:
+      tags: [auth]
       summary: Login user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLoginRequest"
       responses:
         "200":
           description: OK
-  /api/v1/decks:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/folders:
     get:
-      summary: List decks
+      tags: [folders]
+      summary: List folders
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     post:
-      summary: Create deck
+      tags: [folders]
+      summary: Create folder
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FolderWriteRequest"
       responses:
         "201":
           description: Created
-  /api/v1/review/due:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Folder"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/folders/{id}:
+    parameters:
+      - $ref: "#/components/parameters/FolderId"
     get:
-      summary: List due cards
+      tags: [folders]
+      summary: Get folder
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Folder"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Folder not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      tags: [folders]
+      summary: Update folder
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FolderWriteRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Folder"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Folder not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [folders]
+      summary: Delete folder
+      description: |
+        删除文件夹不会删除牌组；服务端会把该文件夹下的牌组 `folder_id` 清空。
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Folder not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/decks:
+    get:
+      tags: [decks]
+      summary: List decks
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeckListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags: [decks]
+      summary: Create deck
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeckWriteRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deck"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Folder not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/decks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/DeckId"
+    get:
+      tags: [decks]
+      summary: Get deck
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deck"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Deck not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      tags: [decks]
+      summary: Update deck
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeckWriteRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deck"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Deck or folder not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [decks]
+      summary: Delete deck
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Deck not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/decks/{id}/cards:
+    parameters:
+      - $ref: "#/components/parameters/DeckId"
+    get:
+      tags: [cards]
+      summary: List cards in deck
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      tags: [cards]
+      summary: Create card in deck
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CardWriteRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Deck not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/cards/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CardId"
+    get:
+      tags: [cards]
+      summary: Get card
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Card not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      tags: [cards]
+      summary: Update card
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CardWriteRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Card not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [cards]
+      summary: Delete card
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Card not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/review/due:
+    get:
+      tags: [review]
+      summary: List due cards
+      description: |
+        仅返回 `study_enabled=true` 的卡片。
+        当传入 `deck_id` 时，服务端会按牌组的 `review_order`（顺序/随机）组织该牌组当天的复习队列。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: deck_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/review/submit:
+    post:
+      tags: [review]
+      summary: Submit review result
+      description: >
+        Submit a review rating online. The server is the single source of truth
+        for FSRS scheduling and returns the updated card state.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewSubmitRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Card not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/sync/push:
+    post:
+      tags: [sync]
+      summary: Push offline operations
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPushRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPushResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/sync/pull:
+    get:
+      tags: [sync]
+      summary: Pull full snapshot
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPullResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/ai/generate:
+    post:
+      tags: [ai]
+      summary: Generate flashcards with AI
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIGenerateRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIGenerateResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/ai/import-file:
+    post:
+      tags: [ai]
+      summary: Generate flashcards from PDF, TXT, or Markdown files
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                topic:
+                  type: string
+                card_count:
+                  type: integer
+                difficulty:
+                  type: string
+                card_types:
+                  type: string
+                  description: Comma-separated card types.
+                strategy:
+                  type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIGenerateResponse"
+        "400":
+          description: Invalid or unsupported file. Text PDFs are supported; scanned PDFs require OCR and may fail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/ai/rewrite-card:
+    post:
+      tags: [ai]
+      summary: Rewrite or improve an existing flashcard with AI
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIRewriteCardRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIRewriteCardResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    FolderId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    DeckId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    CardId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        port:
+          type: string
+          example: "8080"
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    User:
+      type: object
+      required: [id, email, display_name, created_at]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    AuthRequest:
+      type: object
+      required: [email, password, display_name]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        display_name:
+          type: string
+    AuthLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    AuthResponse:
+      type: object
+      required: [user, access_token]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        access_token:
+          type: string
+    FolderWriteRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+    Folder:
+      type: object
+      required: [id, user_id, name, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    FolderListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Folder"
+    ReviewOrder:
+      type: string
+      enum: [sequential, random]
+      default: sequential
+    DeckWriteRequest:
+      type: object
+      required: [name, description, color, icon]
+      properties:
+        folder_id:
+          type: string
+          nullable: true
+          description: Optional parent folder id.
+        name:
+          type: string
+        description:
+          type: string
+        color:
+          type: string
+          example: "#4ECDC4"
+        icon:
+          type: string
+          example: "📚"
+        review_order:
+          $ref: "#/components/schemas/ReviewOrder"
+        new_cards_per_day:
+          type: integer
+          default: 20
+        max_reviews_per_day:
+          type: integer
+          default: 200
+    Deck:
+      type: object
+      required:
+        [
+          id,
+          user_id,
+          name,
+          description,
+          color,
+          icon,
+          review_order,
+          new_cards_per_day,
+          max_reviews_per_day,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        folder_id:
+          type: string
+          nullable: true
+        name:
+          type: string
+        description:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+        review_order:
+          $ref: "#/components/schemas/ReviewOrder"
+        new_cards_per_day:
+          type: integer
+        max_reviews_per_day:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DeckListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Deck"
+    FSRSState:
+      type: object
+      required:
+        [
+          state,
+          difficulty,
+          stability,
+          retrievability,
+          due_date,
+          reps,
+          lapses,
+          elapsed_days,
+          scheduled_days,
+        ]
+      properties:
+        state:
+          type: integer
+          description: 0=new, 1=learning, 2=review, 3=relearning
+        difficulty:
+          type: number
+          format: double
+        stability:
+          type: number
+          format: double
+        retrievability:
+          type: number
+          format: double
+        due_date:
+          type: string
+          format: date-time
+        last_review_at:
+          type: string
+          format: date-time
+          nullable: true
+        reps:
+          type: integer
+        lapses:
+          type: integer
+        elapsed_days:
+          type: number
+          format: double
+        scheduled_days:
+          type: number
+          format: double
+    CardWriteRequest:
+      type: object
+      properties:
+        client_id:
+          type: string
+        title:
+          type: string
+        content:
+          type: string
+        front:
+          type: string
+        back:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+        study_enabled:
+          type: boolean
+          default: false
+        state:
+          $ref: "#/components/schemas/FSRSState"
+    Card:
+      type: object
+      required:
+        [
+          id,
+          client_id,
+          deck_id,
+          user_id,
+          title,
+          content,
+          front,
+          back,
+          tags,
+          note,
+          source,
+          study_enabled,
+          state,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id:
+          type: string
+        client_id:
+          type: string
+        deck_id:
+          type: string
+        user_id:
+          type: string
+        title:
+          type: string
+        content:
+          type: string
+        front:
+          type: string
+        back:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+        source:
+          type: string
+        study_enabled:
+          type: boolean
+        state:
+          $ref: "#/components/schemas/FSRSState"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CardListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Card"
+    ReviewSubmitRequest:
+      type: object
+      required: [card_id, rating, duration_ms]
+      properties:
+        card_id:
+          type: string
+        rating:
+          type: integer
+          enum: [1, 2, 3, 4]
+        duration_ms:
+          type: integer
+    SyncOperation:
+      type: object
+      required: [id, type, payload, occurred_at]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [create_card, update_card, delete_card, submit_review]
+          description: >
+            `submit_review` is kept only for backward compatibility with older
+            clients. Current clients submit review ratings through
+            `/api/v1/review/submit` so FSRS scheduling is calculated by the
+            server.
+        payload:
+          type: object
+          additionalProperties: true
+        occurred_at:
+          type: string
+          format: date-time
+    SyncPushRequest:
+      type: object
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncOperation"
+    SyncOperationResult:
+      type: object
+      required: [operation_id, applied]
+      properties:
+        operation_id:
+          type: string
+        applied:
+          type: boolean
+        error:
+          type: string
+    SyncPushResponse:
+      type: object
+      required: [applied_count, failed_count]
+      properties:
+        applied_count:
+          type: integer
+        failed_count:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncOperationResult"
+    SyncPullResponse:
+      type: object
+      required: [folders, decks, cards, pulled_at, server_time]
+      properties:
+        folders:
+          type: array
+          items:
+            $ref: "#/components/schemas/Folder"
+        decks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Deck"
+        cards:
+          type: array
+          items:
+            $ref: "#/components/schemas/Card"
+        pulled_at:
+          type: string
+          format: date-time
+        server_time:
+          type: string
+          format: date-time
+    AIGenerateRequest:
+      type: object
+      required: [topic, context, card_count, difficulty]
+      properties:
+        topic:
+          type: string
+        context:
+          type: string
+        card_count:
+          type: integer
+        difficulty:
+          type: string
+        card_types:
+          type: array
+          items:
+            type: string
+        strategy:
+          type: string
+        source_name:
+          type: string
+    AIGeneratedCard:
+      type: object
+      required: [title, content, front, back, tags, note]
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        front:
+          type: string
+        back:
+          type: string
+        card_type:
+          type: string
+        knowledge_point:
+          type: string
+        source_excerpt:
+          type: string
+        source_location:
+          type: string
+        difficulty:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+    AIGenerateResponse:
+      type: object
+      required: [items]
+      properties:
+        document:
+          $ref: "#/components/schemas/AIDocumentSummary"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIGeneratedCard"
+    AIDocumentSummary:
+      type: object
+      properties:
+        title:
+          type: string
+        mime_type:
+          type: string
+        text_preview:
+          type: string
+        text_length:
+          type: integer
+        page_count:
+          type: integer
+    AIRewriteCardRequest:
+      type: object
+      required: [title, content, rewrite_type]
+      properties:
+        card_id:
+          type: string
+        title:
+          type: string
+        content:
+          type: string
+        instruction:
+          type: string
+        rewrite_type:
+          type: string
+    AIRewriteCandidate:
+      type: object
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        change_summary:
+          type: string
+        quality_notes:
+          type: array
+          items:
+            type: string
+    AIRewriteCardResponse:
+      type: object
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIRewriteCandidate"

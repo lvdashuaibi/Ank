@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -162,7 +165,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                           ),
                           const SizedBox(height: 16),
                           Text(
-                            '支持正式登录、PostgreSQL 持久化、离线同步队列与 AI 草稿生成。你可以从 Web、macOS 和 iPhone 模拟器无缝体验同一套数据。',
+                            '支持正式登录、PostgreSQL 持久化、服务端 FSRS 排期与 AI 草稿生成。你可以从 Web、macOS 和 iPhone 模拟器无缝体验同一套数据。',
                             style: theme.textTheme.bodyLarge?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
                             ),
@@ -178,8 +181,8 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                                 label: 'AI 草稿',
                               ),
                               _MiniFeatureChip(
-                                icon: Icons.offline_bolt_outlined,
-                                label: '离线可用',
+                                icon: Icons.cloud_done_outlined,
+                                label: '服务端排期',
                               ),
                             ],
                           ),
@@ -190,7 +193,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                             children: const <Widget>[
                               _StatBadge(label: '跨端', value: 'Web+iOS'),
                               _StatBadge(label: '导入', value: 'DSL'),
-                              _StatBadge(label: '同步', value: '在线/离线'),
+                              _StatBadge(label: '排期', value: '服务端'),
                             ],
                           ),
                         ],
@@ -384,13 +387,13 @@ class DeckListScreen extends ConsumerWidget {
     final ThemeData theme = Theme.of(context);
     final int totalCards = state.cards.length;
     final int dueCards = state.dueCards().length;
-    Future<void> openCreateDeck() async {
+    Future<void> openCreateDeck({String? initialFolderId}) async {
       final String? deckId = await showAdaptiveSheet<String>(
         context: context,
         maxWidth: 720,
         isScrollControlled: true,
         builder: (BuildContext context) {
-          return const _CreateDeckSheet();
+          return _CreateDeckSheet(initialFolderId: initialFolderId);
         },
       );
       if (!context.mounted || deckId == null || deckId.isEmpty) {
@@ -399,12 +402,43 @@ class DeckListScreen extends ConsumerWidget {
       context.go('/deck/$deckId');
     }
 
+    Future<void> openCreateFolder() async {
+      await showAdaptiveSheet<String>(
+        context: context,
+        maxWidth: 520,
+        isScrollControlled: true,
+        builder: (BuildContext context) {
+          return const _CreateFolderSheet();
+        },
+      );
+    }
+
+    Future<void> openFolderSettings(FolderModel folder) async {
+      await showAdaptiveSheet<_FolderSheetResult>(
+        context: context,
+        maxWidth: 520,
+        isScrollControlled: true,
+        builder: (BuildContext context) {
+          return _EditFolderSheet(folder: folder);
+        },
+      );
+    }
+
+    final List<FolderModel> folders = List<FolderModel>.from(state.folders)
+      ..sort((FolderModel a, FolderModel b) => a.name.compareTo(b.name));
+    final List<DeckModel> ungroupedDecks = state.ungroupedDecks;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Ank 学习空间'),
         actions: <Widget>[
           IconButton(
-            onPressed: openCreateDeck,
+            onPressed: openCreateFolder,
+            icon: const Icon(Icons.folder_open_outlined),
+            tooltip: '新建文件夹',
+          ),
+          IconButton(
+            onPressed: () => openCreateDeck(),
             icon: const Icon(Icons.create_new_folder_outlined),
             tooltip: '新建牌组',
           ),
@@ -437,7 +471,7 @@ class DeckListScreen extends ConsumerWidget {
             const _InfoPanel(
               icon: Icons.sync,
               title: '正在同步数据',
-              subtitle: '客户端会自动推送离线队列并拉取最新卡片快照。',
+              subtitle: '客户端会自动推送内容编辑队列并拉取最新卡片快照。',
             ),
           if (state.pendingOperationCount > 0)
             _InfoPanel(
@@ -446,25 +480,58 @@ class DeckListScreen extends ConsumerWidget {
               subtitle: '网络恢复后会自动补传，也可以在设置页手动触发同步。',
             ),
           const SizedBox(height: 12),
-          const _SectionHeader(title: '你的牌组', subtitle: '按牌组管理卡片、复习节奏和同步状态'),
-          if (state.decks.isEmpty)
+          const _SectionHeader(
+            title: '你的学习空间',
+            subtitle: '先用文件夹归档，再在文件夹里继续拆分牌组和复习节奏。',
+          ),
+          if (state.decks.isEmpty && folders.isEmpty)
             _EmptyStateCard(
               icon: Icons.layers_clear_outlined,
               title: '还没有可用牌组',
-              subtitle: '先创建一个牌组开始整理内容；如果你已有结构化文本，也可以直接导入 DSL。',
-              primaryActionLabel: '创建牌组',
-              onPrimaryAction: openCreateDeck,
-              secondaryActionLabel: '导入 DSL',
-              onSecondaryAction: () => context.go('/import/dsl'),
+              subtitle: '先创建文件夹或牌组开始整理内容；如果你已有结构化文本，也可以直接导入 DSL。',
+              primaryActionLabel: '创建文件夹',
+              onPrimaryAction: openCreateFolder,
+              secondaryActionLabel: '创建牌组',
+              onSecondaryAction: () => openCreateDeck(),
+              tertiaryActionLabel: '导入 DSL',
+              onTertiaryAction: () => context.go('/import/dsl'),
             )
-          else
-            for (final DeckModel deck in state.decks)
-              _DeckSummaryCard(
-                deck: deck,
-                cardCount: state.cardCountForDeck(deck.id),
-                dueCount: state.dueCountForDeck(deck.id),
-                onTap: () => context.go('/deck/${deck.id}'),
+          else ...<Widget>[
+            for (final FolderModel folder in folders)
+              _FolderDeckSection(
+                folder: folder,
+                decks: state.decksInFolder(folder.id),
+                dueCount: state
+                    .decksInFolder(folder.id)
+                    .fold<int>(
+                      0,
+                      (int total, DeckModel deck) =>
+                          total + state.dueCountForDeck(deck.id),
+                    ),
+                onEdit: () => openFolderSettings(folder),
+                onCreateDeck: () => openCreateDeck(initialFolderId: folder.id),
               ),
+            if (ungroupedDecks.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              const _SectionHeader(title: '未分类牌组', subtitle: '这些牌组暂时不属于任何文件夹。'),
+              for (final DeckModel deck in ungroupedDecks)
+                _DeckSummaryCard(
+                  deck: deck,
+                  cardCount: state.cardCountForDeck(deck.id),
+                  dueCount: state.dueCountForDeck(deck.id),
+                  onTap: () => context.go('/deck/${deck.id}'),
+                ),
+            ],
+            if (folders.isEmpty && ungroupedDecks.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+            ],
+            if (folders.isNotEmpty && ungroupedDecks.isEmpty)
+              _InfoPanel(
+                icon: Icons.folder_copy_outlined,
+                title: '所有牌组都已归档到文件夹',
+                subtitle: '你也可以继续创建未分类牌组，之后再挪进文件夹。',
+              ),
+          ],
         ],
       ),
     );
@@ -539,6 +606,10 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
     final DeckModel deck = resolvedDeck;
     final bool selectionMode = _selectedCardIds.isNotEmpty;
     final String keyword = _searchController.text.trim().toLowerCase();
+    final int studyEnabledCount = state
+        .cardsByDeck(widget.deckId)
+        .where((CardModel card) => card.studyEnabled)
+        .length;
     final List<CardModel> cards = state.cardsByDeck(widget.deckId).where((
       CardModel card,
     ) {
@@ -574,6 +645,12 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
               onPressed: () => _openDeckSettings(deck),
               icon: const Icon(Icons.tune_outlined),
               tooltip: '牌组设置',
+            ),
+          if (!selectionMode)
+            IconButton(
+              onPressed: () => _openAIGenerateSheet(deck),
+              icon: const Icon(Icons.auto_awesome_outlined),
+              tooltip: 'AI 生成卡片',
             ),
           if (!selectionMode)
             IconButton(
@@ -627,6 +704,10 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
               _MetaChip(label: '新卡/天 ${deck.newCardsPerDay}'),
               _MetaChip(label: '最大复习 ${deck.maxReviewsPerDay}'),
               _MetaChip(
+                label: '已加入背诵 $studyEnabledCount',
+                color: theme.colorScheme.secondaryContainer,
+              ),
+              _MetaChip(
                 label: selectionMode
                     ? '已选择 ${_selectedCardIds.length} 张'
                     : '长按进入批量选择',
@@ -662,6 +743,10 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
                 }
                 context.go('/deck/${widget.deckId}/add-card');
               },
+              tertiaryActionLabel: keyword.isEmpty ? 'AI 生成' : null,
+              onTertiaryAction: keyword.isEmpty
+                  ? () => _openAIGenerateSheet(deck)
+                  : null,
             )
           else
             for (final CardModel card in cards)
@@ -679,6 +764,9 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
                       context.go('/deck/${widget.deckId}/card/${card.id}/edit');
                     }
                   },
+                  onToggleStudyEnabled: selectionMode
+                      ? null
+                      : () => _toggleCardStudyEnabled(card),
                 ),
               ),
         ],
@@ -704,6 +792,23 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
         _selectedCardIds.clear();
       });
     }
+  }
+
+  Future<void> _toggleCardStudyEnabled(CardModel card) async {
+    final bool success = await ref
+        .read(appStoreProvider.notifier)
+        .updateCardStudyEnabled(
+          cardId: card.id,
+          studyEnabled: !card.studyEnabled,
+        );
+    if (!mounted || success) {
+      return;
+    }
+    final String message =
+        ref.read(appStoreProvider).errorMessage ?? '更新背诵状态失败';
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _confirmDeleteSelectedCards() async {
@@ -750,9 +855,25 @@ class _DeckDetailScreenState extends ConsumerState<DeckDetailScreen> {
       context.go('/');
     }
   }
+
+  Future<void> _openAIGenerateSheet(DeckModel deck) async {
+    ref.read(appStoreProvider.notifier).clearGeneratedCards();
+    await showAdaptiveSheet<bool>(
+      context: context,
+      maxWidth: 760,
+      isScrollControlled: true,
+      builder: (BuildContext context) {
+        return _AIGenerateCardsSheet(deck: deck);
+      },
+    );
+  }
 }
 
 enum _DeckSheetResult { saved, deleted }
+
+enum _FolderSheetResult { saved, deleted }
+
+const String _noFolderSelection = '__none__';
 
 class _EditDeckSheet extends ConsumerStatefulWidget {
   const _EditDeckSheet({required this.deck});
@@ -771,6 +892,8 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
   late final TextEditingController _maxReviewsController;
   late String _selectedIcon;
   late String _selectedColor;
+  late String? _selectedFolderId;
+  late DeckReviewOrder _selectedReviewOrder;
   bool _submitting = false;
   bool _deleting = false;
   String? _inlineError;
@@ -792,6 +915,8 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
     );
     _selectedIcon = _normalizeDeckIconChoice(widget.deck.icon);
     _selectedColor = _normalizeDeckColorChoice(widget.deck.colorHex);
+    _selectedFolderId = widget.deck.folderId;
+    _selectedReviewOrder = widget.deck.reviewOrder;
   }
 
   @override
@@ -805,7 +930,10 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final AppState state = ref.watch(appStoreProvider);
     final ThemeData theme = Theme.of(context);
+    final List<FolderModel> folders = List<FolderModel>.from(state.folders)
+      ..sort((FolderModel a, FolderModel b) => a.name.compareTo(b.name));
     final Color deckColor = _parseDeckColor(_selectedColor, theme);
     final String previewName = _nameController.text.trim().isEmpty
         ? '牌组名称'
@@ -819,6 +947,16 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
     final String previewMaxReviews = _maxReviewsController.text.trim().isEmpty
         ? '200'
         : _maxReviewsController.text.trim();
+    final String previewFolder = _selectedFolderId == null
+        ? '未分类'
+        : folders
+                  .cast<FolderModel?>()
+                  .firstWhere(
+                    (FolderModel? item) => item?.id == _selectedFolderId,
+                    orElse: () => null,
+                  )
+                  ?.name ??
+              '未分类';
 
     return SafeArea(
       child: Padding(
@@ -902,6 +1040,10 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
                                 spacing: 8,
                                 runSpacing: 8,
                                 children: <Widget>[
+                                  _MetaChip(label: '文件夹 $previewFolder'),
+                                  _MetaChip(
+                                    label: '背诵 ${_selectedReviewOrder.label}',
+                                  ),
                                   _MetaChip(label: '新卡/天 $previewNewCards'),
                                   _MetaChip(label: '最大复习 $previewMaxReviews'),
                                 ],
@@ -1015,6 +1157,53 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
                                   ],
                                 );
                               },
+                        ),
+                        const SizedBox(height: 16),
+                        DropdownButtonFormField<String>(
+                          initialValue: _selectedFolderId ?? _noFolderSelection,
+                          decoration: const InputDecoration(labelText: '所属文件夹'),
+                          items: <DropdownMenuItem<String>>[
+                            const DropdownMenuItem<String>(
+                              value: _noFolderSelection,
+                              child: Text('未分类'),
+                            ),
+                            ...folders.map(
+                              (FolderModel folder) => DropdownMenuItem<String>(
+                                value: folder.id,
+                                child: Text(folder.name),
+                              ),
+                            ),
+                          ],
+                          onChanged: (String? value) {
+                            setState(() {
+                              _selectedFolderId =
+                                  value == null || value == _noFolderSelection
+                                  ? null
+                                  : value;
+                              _inlineError = null;
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        Text('背诵顺序', style: theme.textTheme.titleSmall),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: DeckReviewOrder.values.map((
+                            DeckReviewOrder order,
+                          ) {
+                            return ChoiceChip(
+                              label: Text(order.label),
+                              selected: _selectedReviewOrder == order,
+                              onSelected: (_) {
+                                setState(() {
+                                  _selectedReviewOrder = order;
+                                  _inlineError = null;
+                                });
+                              },
+                            );
+                          }).toList(),
                         ),
                         const SizedBox(height: 16),
                         Text('图标', style: theme.textTheme.titleSmall),
@@ -1176,6 +1365,8 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
           description: _descriptionController.text,
           icon: _selectedIcon,
           colorHex: _selectedColor,
+          folderId: _selectedFolderId,
+          reviewOrder: _selectedReviewOrder,
           newCardsPerDay: newCardsPerDay,
           maxReviewsPerDay: maxReviewsPerDay,
         );
@@ -1246,8 +1437,361 @@ class _EditDeckSheetState extends ConsumerState<_EditDeckSheet> {
   }
 }
 
+class _CreateFolderSheet extends ConsumerStatefulWidget {
+  const _CreateFolderSheet();
+
+  @override
+  ConsumerState<_CreateFolderSheet> createState() => _CreateFolderSheetState();
+}
+
+class _CreateFolderSheetState extends ConsumerState<_CreateFolderSheet> {
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  final TextEditingController _nameController = TextEditingController();
+  bool _submitting = false;
+  String? _inlineError;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Text('创建文件夹', style: theme.textTheme.headlineSmall),
+                  const SizedBox(height: 8),
+                  Text(
+                    '文件夹在牌组之上，用来归档同一主题下的多个牌组。',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Form(
+                    key: _formKey,
+                    child: TextFormField(
+                      controller: _nameController,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: '文件夹名称',
+                        hintText: '例如：英语 / 面试 / 专业课',
+                      ),
+                      validator: (String? value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return '请输入文件夹名称';
+                        }
+                        return null;
+                      },
+                      onChanged: (_) => setState(() => _inlineError = null),
+                    ),
+                  ),
+                  if (_inlineError != null) ...<Widget>[
+                    const SizedBox(height: 14),
+                    _InlineMessage(
+                      icon: Icons.error_outline,
+                      text: _inlineError!,
+                      color: theme.colorScheme.error,
+                    ),
+                  ],
+                  const SizedBox(height: 18),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: _submitting
+                              ? null
+                              : () => Navigator.of(context).pop(),
+                          child: const Text('取消'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _submitting ? null : _submit,
+                          icon: _submitting
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.create_new_folder_outlined),
+                          label: Text(_submitting ? '创建中…' : '创建文件夹'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _inlineError = null;
+    });
+    final FolderModel? created = await ref
+        .read(appStoreProvider.notifier)
+        .createFolder(name: _nameController.text);
+    if (!mounted) {
+      return;
+    }
+    if (created == null) {
+      setState(() {
+        _submitting = false;
+        _inlineError =
+            ref.read(appStoreProvider).errorMessage ?? '创建文件夹失败，请稍后重试';
+      });
+      return;
+    }
+    Navigator.of(context).pop(created.id);
+  }
+}
+
+class _EditFolderSheet extends ConsumerStatefulWidget {
+  const _EditFolderSheet({required this.folder});
+
+  final FolderModel folder;
+
+  @override
+  ConsumerState<_EditFolderSheet> createState() => _EditFolderSheetState();
+}
+
+class _EditFolderSheetState extends ConsumerState<_EditFolderSheet> {
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  late final TextEditingController _nameController;
+  bool _submitting = false;
+  bool _deleting = false;
+  String? _inlineError;
+
+  bool get _busy => _submitting || _deleting;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.folder.name);
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Text('文件夹设置', style: theme.textTheme.headlineSmall),
+                  const SizedBox(height: 8),
+                  Text(
+                    '删除文件夹不会删除里面的牌组，只会把它们移到未分类。',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Form(
+                    key: _formKey,
+                    child: TextFormField(
+                      controller: _nameController,
+                      decoration: const InputDecoration(
+                        labelText: '文件夹名称',
+                        hintText: '例如：英语 / 面试 / 专业课',
+                      ),
+                      validator: (String? value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return '请输入文件夹名称';
+                        }
+                        return null;
+                      },
+                      onChanged: (_) => setState(() => _inlineError = null),
+                    ),
+                  ),
+                  if (_inlineError != null) ...<Widget>[
+                    const SizedBox(height: 14),
+                    _InlineMessage(
+                      icon: Icons.error_outline,
+                      text: _inlineError!,
+                      color: theme.colorScheme.error,
+                    ),
+                  ],
+                  const SizedBox(height: 18),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: _busy
+                              ? null
+                              : () => Navigator.of(context).pop(),
+                          child: const Text('取消'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _busy ? null : _submit,
+                          icon: _submitting
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.check_circle_outline),
+                          label: Text(_submitting ? '保存中…' : '保存设置'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _confirmDelete,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: theme.colorScheme.error,
+                      side: BorderSide(
+                        color: theme.colorScheme.error.withValues(alpha: 0.32),
+                      ),
+                    ),
+                    icon: _deleting
+                        ? SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                theme.colorScheme.error,
+                              ),
+                            ),
+                          )
+                        : const Icon(Icons.delete_outline),
+                    label: Text(_deleting ? '删除中…' : '删除文件夹'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _inlineError = null;
+    });
+    final FolderModel? updated = await ref
+        .read(appStoreProvider.notifier)
+        .updateFolder(folderId: widget.folder.id, name: _nameController.text);
+    if (!mounted) {
+      return;
+    }
+    if (updated == null) {
+      setState(() {
+        _submitting = false;
+        _inlineError =
+            ref.read(appStoreProvider).errorMessage ?? '保存文件夹失败，请稍后重试';
+      });
+      return;
+    }
+    Navigator.of(context).pop(_FolderSheetResult.saved);
+  }
+
+  Future<void> _confirmDelete() async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('删除这个文件夹？'),
+          content: Text('删除后，里面的牌组会移到未分类，但不会被删除。'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
+              child: const Text('确认删除'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) {
+      return;
+    }
+    setState(() {
+      _deleting = true;
+      _inlineError = null;
+    });
+    final bool deleted = await ref
+        .read(appStoreProvider.notifier)
+        .deleteFolder(widget.folder.id);
+    if (!mounted) {
+      return;
+    }
+    if (!deleted) {
+      setState(() {
+        _deleting = false;
+        _inlineError =
+            ref.read(appStoreProvider).errorMessage ?? '删除文件夹失败，请稍后重试';
+      });
+      return;
+    }
+    Navigator.of(context).pop(_FolderSheetResult.deleted);
+  }
+}
+
 class _CreateDeckSheet extends ConsumerStatefulWidget {
-  const _CreateDeckSheet();
+  const _CreateDeckSheet({this.initialFolderId});
+
+  final String? initialFolderId;
 
   @override
   ConsumerState<_CreateDeckSheet> createState() => _CreateDeckSheetState();
@@ -1259,8 +1803,16 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
   final TextEditingController _descriptionController = TextEditingController();
   String _selectedIcon = _deckIconChoices.first.raw;
   String _selectedColor = _deckColorChoices.first;
+  String? _selectedFolderId;
+  DeckReviewOrder _selectedReviewOrder = DeckReviewOrder.sequential;
   bool _submitting = false;
   String? _inlineError;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedFolderId = widget.initialFolderId;
+  }
 
   @override
   void dispose() {
@@ -1271,7 +1823,10 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final AppState state = ref.watch(appStoreProvider);
     final ThemeData theme = Theme.of(context);
+    final List<FolderModel> folders = List<FolderModel>.from(state.folders)
+      ..sort((FolderModel a, FolderModel b) => a.name.compareTo(b.name));
     final Color deckColor = _parseDeckColor(_selectedColor, theme);
     final String previewName = _nameController.text.trim().isEmpty
         ? '新牌组'
@@ -1279,6 +1834,16 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
     final String previewDescription = _descriptionController.text.trim().isEmpty
         ? '把同一主题的卡片整理到这里，后续可以继续补卡和复习。'
         : _descriptionController.text.trim();
+    final String previewFolder = _selectedFolderId == null
+        ? '未分类'
+        : folders
+                  .cast<FolderModel?>()
+                  .firstWhere(
+                    (FolderModel? item) => item?.id == _selectedFolderId,
+                    orElse: () => null,
+                  )
+                  ?.name ??
+              '未分类';
 
     return SafeArea(
       child: Padding(
@@ -1361,9 +1926,13 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
                               Wrap(
                                 spacing: 8,
                                 runSpacing: 8,
-                                children: const <Widget>[
-                                  _MetaChip(label: '新卡/天 20'),
-                                  _MetaChip(label: '最大复习 200'),
+                                children: <Widget>[
+                                  _MetaChip(label: '文件夹 $previewFolder'),
+                                  _MetaChip(
+                                    label: '背诵 ${_selectedReviewOrder.label}',
+                                  ),
+                                  const _MetaChip(label: '新卡/天 20'),
+                                  const _MetaChip(label: '最大复习 200'),
                                 ],
                               ),
                             ],
@@ -1404,6 +1973,53 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
                             hintText: '简单描述这个牌组的主题或使用场景。',
                           ),
                           onChanged: (_) => setState(() => _inlineError = null),
+                        ),
+                        const SizedBox(height: 16),
+                        DropdownButtonFormField<String>(
+                          initialValue: _selectedFolderId ?? _noFolderSelection,
+                          decoration: const InputDecoration(labelText: '所属文件夹'),
+                          items: <DropdownMenuItem<String>>[
+                            const DropdownMenuItem<String>(
+                              value: _noFolderSelection,
+                              child: Text('未分类'),
+                            ),
+                            ...folders.map(
+                              (FolderModel folder) => DropdownMenuItem<String>(
+                                value: folder.id,
+                                child: Text(folder.name),
+                              ),
+                            ),
+                          ],
+                          onChanged: (String? value) {
+                            setState(() {
+                              _selectedFolderId =
+                                  value == null || value == _noFolderSelection
+                                  ? null
+                                  : value;
+                              _inlineError = null;
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        Text('背诵顺序', style: theme.textTheme.titleSmall),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: DeckReviewOrder.values.map((
+                            DeckReviewOrder order,
+                          ) {
+                            return ChoiceChip(
+                              label: Text(order.label),
+                              selected: _selectedReviewOrder == order,
+                              onSelected: (_) {
+                                setState(() {
+                                  _selectedReviewOrder = order;
+                                  _inlineError = null;
+                                });
+                              },
+                            );
+                          }).toList(),
                         ),
                         const SizedBox(height: 16),
                         Text('图标', style: theme.textTheme.titleSmall),
@@ -1512,6 +2128,8 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
           description: _descriptionController.text,
           icon: _selectedIcon,
           colorHex: _selectedColor,
+          folderId: _selectedFolderId,
+          reviewOrder: _selectedReviewOrder,
         );
     if (!mounted) {
       return;
@@ -1525,6 +2143,608 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
       return;
     }
     Navigator.of(context).pop(created.id);
+  }
+}
+
+class _AIGenerateCardsSheet extends ConsumerStatefulWidget {
+  const _AIGenerateCardsSheet({required this.deck});
+
+  final DeckModel deck;
+
+  @override
+  ConsumerState<_AIGenerateCardsSheet> createState() =>
+      _AIGenerateCardsSheetState();
+}
+
+class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  late final TextEditingController _topicController;
+  final TextEditingController _contextController = TextEditingController();
+  final TextEditingController _countController = TextEditingController(
+    text: '6',
+  );
+  _AIGenerateSourceMode _sourceMode = _AIGenerateSourceMode.topic;
+  String _difficulty = 'medium';
+  bool _saveToReview = false;
+  bool _pickingFile = false;
+  bool _saving = false;
+  PlatformFile? _selectedFile;
+  String? _inlineError;
+
+  @override
+  void initState() {
+    super.initState();
+    _topicController = TextEditingController(text: widget.deck.name);
+  }
+
+  @override
+  void dispose() {
+    _topicController.dispose();
+    _contextController.dispose();
+    _countController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppState state = ref.watch(appStoreProvider);
+    final ThemeData theme = Theme.of(context);
+    final List<AIGeneratedCard> generated = state.generatedCards;
+    final AIDocumentSummary? document = state.generatedDocument;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              'AI 生成卡片',
+                              style: theme.textTheme.headlineSmall,
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              '为「${widget.deck.name}」生成一组可编辑草稿，确认后再保存到牌组。',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: state.syncInProgress || _saving
+                            ? null
+                            : () => Navigator.of(context).pop(false),
+                        icon: const Icon(Icons.close),
+                        tooltip: '关闭',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        TextFormField(
+                          controller: _topicController,
+                          decoration: const InputDecoration(
+                            labelText: '主题',
+                            hintText: '例如：操作系统进程调度 / CET-4 高频词',
+                          ),
+                          validator: (String? value) {
+                            if (value == null || value.trim().isEmpty) {
+                              return '请输入生成主题';
+                            }
+                            return null;
+                          },
+                          onChanged: (_) => setState(() => _inlineError = null),
+                        ),
+                        const SizedBox(height: 12),
+                        SegmentedButton<_AIGenerateSourceMode>(
+                          segments:
+                              const <ButtonSegment<_AIGenerateSourceMode>>[
+                                ButtonSegment<_AIGenerateSourceMode>(
+                                  value: _AIGenerateSourceMode.topic,
+                                  icon: Icon(Icons.edit_note_outlined),
+                                  label: Text('输入内容'),
+                                ),
+                                ButtonSegment<_AIGenerateSourceMode>(
+                                  value: _AIGenerateSourceMode.file,
+                                  icon: Icon(Icons.upload_file_outlined),
+                                  label: Text('导入文件'),
+                                ),
+                              ],
+                          selected: <_AIGenerateSourceMode>{_sourceMode},
+                          onSelectionChanged:
+                              (Set<_AIGenerateSourceMode> value) {
+                                setState(() {
+                                  _sourceMode = value.first;
+                                  _inlineError = null;
+                                });
+                              },
+                        ),
+                        const SizedBox(height: 12),
+                        if (_sourceMode == _AIGenerateSourceMode.topic)
+                          TextFormField(
+                            controller: _contextController,
+                            minLines: 3,
+                            maxLines: 5,
+                            decoration: const InputDecoration(
+                              labelText: '补充背景（可选）',
+                              hintText: '粘贴课程大纲、知识点列表或你想覆盖的范围。',
+                            ),
+                            onChanged: (_) =>
+                                setState(() => _inlineError = null),
+                          )
+                        else
+                          _AIFilePickerCard(
+                            file: _selectedFile,
+                            picking: _pickingFile,
+                            onPick: _pickFile,
+                          ),
+                        const SizedBox(height: 12),
+                        LayoutBuilder(
+                          builder:
+                              (
+                                BuildContext context,
+                                BoxConstraints constraints,
+                              ) {
+                                final bool compact = constraints.maxWidth < 520;
+                                final Widget countField = TextFormField(
+                                  controller: _countController,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: '生成数量',
+                                    hintText: '6',
+                                  ),
+                                  validator: (String? value) {
+                                    final int? parsed = int.tryParse(
+                                      (value ?? '').trim(),
+                                    );
+                                    if (parsed == null ||
+                                        parsed < 1 ||
+                                        parsed > 20) {
+                                      return '请输入 1-20';
+                                    }
+                                    return null;
+                                  },
+                                  onChanged: (_) =>
+                                      setState(() => _inlineError = null),
+                                );
+                                final Widget difficultyField =
+                                    DropdownButtonFormField<String>(
+                                      initialValue: _difficulty,
+                                      decoration: const InputDecoration(
+                                        labelText: '难度',
+                                      ),
+                                      items: const <DropdownMenuItem<String>>[
+                                        DropdownMenuItem<String>(
+                                          value: 'easy',
+                                          child: Text('入门'),
+                                        ),
+                                        DropdownMenuItem<String>(
+                                          value: 'medium',
+                                          child: Text('标准'),
+                                        ),
+                                        DropdownMenuItem<String>(
+                                          value: 'hard',
+                                          child: Text('进阶'),
+                                        ),
+                                      ],
+                                      onChanged: (String? value) {
+                                        if (value == null) return;
+                                        setState(() {
+                                          _difficulty = value;
+                                          _inlineError = null;
+                                        });
+                                      },
+                                    );
+                                if (compact) {
+                                  return Column(
+                                    children: <Widget>[
+                                      countField,
+                                      const SizedBox(height: 12),
+                                      difficultyField,
+                                    ],
+                                  );
+                                }
+                                return Row(
+                                  children: <Widget>[
+                                    Expanded(child: countField),
+                                    const SizedBox(width: 12),
+                                    Expanded(child: difficultyField),
+                                  ],
+                                );
+                              },
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_inlineError != null) ...<Widget>[
+                    const SizedBox(height: 12),
+                    _InlineMessage(
+                      icon: Icons.error_outline,
+                      text: _inlineError!,
+                      color: theme.colorScheme.error,
+                    ),
+                  ],
+                  if (state.errorMessage != null) ...<Widget>[
+                    const SizedBox(height: 12),
+                    _InlineMessage(
+                      icon: Icons.info_outline,
+                      text: state.errorMessage!,
+                      color: theme.colorScheme.tertiary,
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: state.syncInProgress ? null : _generate,
+                    icon: state.syncInProgress
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.auto_awesome_outlined),
+                    label: Text(state.syncInProgress ? '生成中…' : '生成草稿'),
+                  ),
+                  if (generated.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 18),
+                    if (document != null) ...<Widget>[
+                      _AIDocumentSummaryCard(document: document),
+                      const SizedBox(height: 12),
+                    ],
+                    _SectionHeader(
+                      title: '生成结果',
+                      subtitle: '检查草稿内容后保存到当前牌组，之后仍可逐张编辑。',
+                    ),
+                    for (final AIGeneratedCard item in generated)
+                      _GeneratedCardPreview(item: item),
+                    const SizedBox(height: 10),
+                    SwitchListTile(
+                      value: _saveToReview,
+                      onChanged: _saving
+                          ? null
+                          : (bool value) =>
+                                setState(() => _saveToReview = value),
+                      title: const Text('保存后加入背诵'),
+                      subtitle: const Text('开启后会进入服务端 FSRS 复习队列。'),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _saving
+                                ? null
+                                : () => ref
+                                      .read(appStoreProvider.notifier)
+                                      .clearGeneratedCards(),
+                            child: const Text('清空结果'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: _saving ? null : _saveGenerated,
+                            icon: _saving
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.save_outlined),
+                            label: Text(_saving ? '保存中…' : '保存到牌组'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _generate() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    setState(() => _inlineError = null);
+    if (_sourceMode == _AIGenerateSourceMode.file) {
+      final PlatformFile? file = _selectedFile;
+      if (file == null || file.bytes == null) {
+        setState(() => _inlineError = '请选择 PDF、TXT 或 Markdown 文件');
+        return;
+      }
+      await ref
+          .read(appStoreProvider.notifier)
+          .generateCardsFromFile(
+            filename: file.name,
+            bytes: file.bytes!,
+            topic: _topicController.text.trim(),
+            cardCount: int.parse(_countController.text.trim()),
+            difficulty: _difficulty,
+          );
+      return;
+    }
+    await ref
+        .read(appStoreProvider.notifier)
+        .generateCards(
+          topic: _topicController.text.trim(),
+          context: _contextController.text.trim(),
+          cardCount: int.parse(_countController.text.trim()),
+          difficulty: _difficulty,
+        );
+  }
+
+  Future<void> _pickFile() async {
+    setState(() {
+      _pickingFile = true;
+      _inlineError = null;
+    });
+    try {
+      final FilePickerResult? result = await FilePicker.platform
+          .pickFiles(
+            type: FileType.custom,
+            allowedExtensions: const <String>['pdf', 'txt', 'md', 'markdown'],
+            withData: true,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted) {
+        return;
+      }
+      if (result == null || result.files.isEmpty) {
+        setState(() => _inlineError = '没有选择文件');
+        return;
+      }
+      final PlatformFile file = result.files.single;
+      if (file.bytes == null) {
+        setState(() => _inlineError = '无法读取文件内容，请换一个本地文件再试');
+        return;
+      }
+      setState(() => _selectedFile = file);
+    } on TimeoutException {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _inlineError = '文件选择器响应超时，请重新点击选择文件');
+    } on PlatformException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _inlineError = '打开文件选择器失败：${error.message ?? error.code}');
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _inlineError = '打开文件选择器失败，请稍后重试');
+    } finally {
+      if (mounted) {
+        setState(() => _pickingFile = false);
+      }
+    }
+  }
+
+  Future<void> _saveGenerated() async {
+    setState(() {
+      _saving = true;
+      _inlineError = null;
+    });
+    await ref
+        .read(appStoreProvider.notifier)
+        .saveGeneratedCardsToDeck(widget.deck.id, studyEnabled: _saveToReview);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _saving = false);
+    Navigator.of(context).pop(true);
+  }
+}
+
+class _GeneratedCardPreview extends StatelessWidget {
+  const _GeneratedCardPreview({required this.item});
+
+  final AIGeneratedCard item;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final CardDocumentParts parts = CardDocumentCodec.parse(item.content);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              item.title.isEmpty ? '未命名卡片' : item.title,
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              CardDocumentCodec.promptPreview(item.content),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium,
+            ),
+            if (parts.answer.trim().isNotEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                parts.answer,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+            if (item.tags.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: <Widget>[
+                  for (final String tag in item.tags.take(5))
+                    _MetaChip(label: tag),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _AIGenerateSourceMode { topic, file }
+
+class _AIFilePickerCard extends StatelessWidget {
+  const _AIFilePickerCard({
+    required this.file,
+    required this.picking,
+    required this.onPick,
+  });
+
+  final PlatformFile? file;
+  final bool picking;
+  final VoidCallback onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final PlatformFile? selected = file;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        color: theme.colorScheme.surfaceContainerLowest,
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(Icons.picture_as_pdf_outlined, color: theme.colorScheme.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  selected == null
+                      ? '选择 PDF / TXT / Markdown 文件'
+                      : selected.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  selected == null
+                      ? 'PDF 先支持可复制文本的文件，扫描版 OCR 后续扩展。'
+                      : _formatFileSize(selected.size),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          OutlinedButton.icon(
+            onPressed: picking ? null : onPick,
+            icon: picking
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.upload_file_outlined, size: 18),
+            label: Text(selected == null ? '选择' : '更换'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AIDocumentSummaryCard extends StatelessWidget {
+  const _AIDocumentSummaryCard({required this.document});
+
+  final AIDocumentSummary document;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Icon(
+                  Icons.description_outlined,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    document.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                _MetaChip(label: '文本 ${document.textLength} 字'),
+                if (document.pageCount > 0)
+                  _MetaChip(label: 'PDF ${document.pageCount} 页'),
+              ],
+            ),
+            if (document.textPreview.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                document.textPreview,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -1542,7 +2762,9 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   bool _revealed = false;
   String? _activeCardId;
   String? _sessionDeckId;
+  ReviewRating? _submittingRating;
   List<String> _sessionQueueCardIds = <String>[];
+  final Set<String> _sessionRepeatCardIds = <String>{};
 
   @override
   Widget build(BuildContext context) {
@@ -1552,8 +2774,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       _sessionDeckId = widget.deckId;
       _sessionTotal = 0;
       _sessionQueueCardIds = <String>[];
+      _sessionRepeatCardIds.clear();
       _activeCardId = null;
       _revealed = false;
+      _submittingRating = null;
     }
     if (_sessionQueueCardIds.isEmpty && plannedQueue.isNotEmpty) {
       _sessionQueueCardIds = plannedQueue
@@ -1564,8 +2788,20 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     final Map<String, CardModel> plannedQueueById = <String, CardModel>{
       for (final CardModel card in plannedQueue) card.id: card,
     };
+    final Map<String, CardModel> allCardsById = <String, CardModel>{
+      for (final CardModel card in state.cards) card.id: card,
+    };
     List<CardModel> dueCards = _sessionQueueCardIds
-        .map((String id) => plannedQueueById[id])
+        .map((String id) {
+          final CardModel? planned = plannedQueueById[id];
+          if (planned != null) {
+            return planned;
+          }
+          if (_sessionRepeatCardIds.contains(id)) {
+            return allCardsById[id];
+          }
+          return null;
+        })
         .whereType<CardModel>()
         .toList();
     if (dueCards.isEmpty && plannedQueue.isNotEmpty) {
@@ -1707,34 +2943,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 180),
             child: canRate
-                ? Row(
-                    key: const ValueKey<String>('rating-row'),
-                    children: <Widget>[
-                      for (
-                        int index = 0;
-                        index < ReviewRating.values.length;
-                        index += 1
-                      ) ...<Widget>[
-                        Expanded(
-                          child: _ReviewRatingButton(
-                            icon: _iconFor(ReviewRating.values[index]),
-                            label: _labelFor(ReviewRating.values[index]),
-                            hint: _hintFor(ReviewRating.values[index]),
-                            color: _ratingColor(
-                              context,
-                              ReviewRating.values[index],
-                            ),
-                            onPressed: () => _submit(
-                              ReviewRating.values[index],
-                              currentCard.id,
-                            ),
-                          ),
-                        ),
-                        if (index != ReviewRating.values.length - 1)
-                          const SizedBox(width: 8),
-                      ],
-                    ],
-                  )
+                ? _buildRatingControls(context, currentCard.id)
                 : Container(
                     key: const ValueKey<String>('rating-hint'),
                     padding: const EdgeInsets.symmetric(
@@ -1781,26 +2990,26 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   String _labelFor(ReviewRating rating) {
     switch (rating) {
       case ReviewRating.again:
-        return '重来';
+        return '没想起';
       case ReviewRating.hard:
-        return '困难';
+        return '想起但卡住';
       case ReviewRating.good:
-        return '良好';
+        return '正常想起';
       case ReviewRating.easy:
-        return '简单';
+        return '一眼就会';
     }
   }
 
-  String _hintFor(ReviewRating rating) {
+  String _descriptionFor(ReviewRating rating) {
     switch (rating) {
       case ReviewRating.again:
-        return '完全没想起，需要尽快再看';
+        return '看答案前没有回忆出来';
       case ReviewRating.hard:
-        return '勉强想起，建议缩短间隔';
+        return '想起来了，但慢或不确定';
       case ReviewRating.good:
-        return '正常回忆成功，按标准节奏推进';
+        return '能稳定回忆，基本准确';
       case ReviewRating.easy:
-        return '非常轻松，可以拉长复习间隔';
+        return '秒答且非常确定';
     }
   }
 
@@ -1809,7 +3018,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       case ReviewRating.again:
         return Icons.refresh_rounded;
       case ReviewRating.hard:
-        return Icons.trending_flat_rounded;
+        return Icons.hourglass_bottom_rounded;
       case ReviewRating.good:
         return Icons.check_circle_outline_rounded;
       case ReviewRating.easy:
@@ -1831,14 +3040,74 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     }
   }
 
+  Widget _buildRatingControls(BuildContext context, String cardId) {
+    return LayoutBuilder(
+      key: const ValueKey<String>('rating-controls'),
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final bool compact = constraints.maxWidth < 600;
+        final double itemWidth = compact
+            ? (constraints.maxWidth - 8) / 2
+            : (constraints.maxWidth - 24) / 4;
+        return Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            for (final ReviewRating rating in ReviewRating.values)
+              SizedBox(
+                width: itemWidth,
+                child: _ReviewRatingButton(
+                  icon: _iconFor(rating),
+                  label: _labelFor(rating),
+                  description: _descriptionFor(rating),
+                  color: _ratingColor(context, rating),
+                  loading: _submittingRating == rating,
+                  onPressed: _submittingRating == null
+                      ? () => _submit(rating, cardId)
+                      : null,
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _submit(ReviewRating rating, String cardId) async {
-    await ref
+    if (_submittingRating != null) {
+      return;
+    }
+    setState(() => _submittingRating = rating);
+    final CardModel? updated = await ref
         .read(appStoreProvider.notifier)
         .submitReview(cardId: cardId, rating: rating);
     if (!mounted) return;
+    if (updated == null) {
+      final String message =
+          ref.read(appStoreProvider).errorMessage ?? '提交评分失败，请稍后重试';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+      setState(() => _submittingRating = null);
+      return;
+    }
     setState(() {
+      _sessionQueueCardIds.remove(cardId);
+      _sessionRepeatCardIds.remove(cardId);
+      if (_shouldRepeatInCurrentSession(rating, updated)) {
+        _sessionQueueCardIds.add(cardId);
+        _sessionRepeatCardIds.add(cardId);
+      }
       _revealed = false;
+      _submittingRating = null;
     });
+  }
+
+  bool _shouldRepeatInCurrentSession(ReviewRating rating, CardModel card) {
+    if (rating == ReviewRating.good || rating == ReviewRating.easy) {
+      return false;
+    }
+    return card.studyEnabled &&
+        (card.state.state == 1 || card.state.state == 3);
   }
 }
 
@@ -1853,8 +3122,48 @@ class StatsScreen extends ConsumerWidget {
     final int localCards = state.cards
         .where((CardModel item) => item.id.startsWith('local_'))
         .length;
+    final int studyCards = state.cards
+        .where((CardModel item) => item.studyEnabled)
+        .length;
+    final int draftCards = totalCards - studyCards;
+    final DateTime now = DateTime.now();
+    final List<CardModel> nextDueCards =
+        state.cards
+            .where((CardModel item) => item.studyEnabled)
+            .where((CardModel item) => item.state.dueDate.isAfter(now))
+            .toList()
+          ..sort(
+            (CardModel a, CardModel b) =>
+                a.state.dueDate.compareTo(b.state.dueDate),
+          );
+    final DateTime? nextDueAt = nextDueCards.isEmpty
+        ? null
+        : nextDueCards.first.state.dueDate;
+    final List<_DeckDueSummary> deckDueSummaries =
+        state.decks
+            .map(
+              (DeckModel deck) => _DeckDueSummary(
+                deck: deck,
+                dueCount: state.dueCountForDeck(deck.id),
+                cardCount: state.cardCountForDeck(deck.id),
+              ),
+            )
+            .where((_DeckDueSummary item) => item.cardCount > 0)
+            .toList()
+          ..sort((_DeckDueSummary a, _DeckDueSummary b) {
+            final int dueCompare = b.dueCount.compareTo(a.dueCount);
+            if (dueCompare != 0) {
+              return dueCompare;
+            }
+            return a.deck.name.compareTo(b.deck.name);
+          });
+    final List<_UpcomingLoad> upcomingLoads = _buildUpcomingLoads(
+      state.cards,
+      now,
+    );
     final double dueRatio = totalCards == 0 ? 0 : dueCards / totalCards;
     final double localRatio = totalCards == 0 ? 0 : localCards / totalCards;
+    final double studyRatio = totalCards == 0 ? 0 : studyCards / totalCards;
     final double syncHealth = state.pendingOperationCount >= 5
         ? 0
         : 1 - (state.pendingOperationCount / 5);
@@ -1866,7 +3175,7 @@ class StatsScreen extends ConsumerWidget {
         children: <Widget>[
           _HeroPanel(
             title: '学习统计',
-            subtitle: '从复习进度、离线同步和本地临时数据三个维度观察当前状态。',
+            subtitle: '从复习进度、同步队列和本地临时数据三个维度观察当前状态。',
             trailing: Wrap(
               spacing: 10,
               runSpacing: 10,
@@ -1886,10 +3195,12 @@ class StatsScreen extends ConsumerWidget {
             children: <Widget>[
               _MetricCard(title: '牌组数量', value: '${state.decks.length}'),
               _MetricCard(title: '卡片总数', value: '$totalCards'),
+              _MetricCard(title: '已加入背诵', value: '$studyCards'),
+              _MetricCard(title: '草稿卡片', value: '$draftCards'),
               _MetricCard(title: '待复习卡片', value: '$dueCards'),
               _MetricCard(title: '今日完成', value: '${state.completedToday}'),
               _MetricCard(
-                title: '离线待同步',
+                title: '内容待同步',
                 value: '${state.pendingOperationCount}',
               ),
               _MetricCard(title: '本地临时卡片', value: '$localCards'),
@@ -1960,6 +3271,287 @@ class StatsScreen extends ConsumerWidget {
                 ],
               );
             },
+          ),
+          const SizedBox(height: 18),
+          LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) {
+              final bool compact = constraints.maxWidth < 840;
+              final double cardWidth = compact
+                  ? constraints.maxWidth
+                  : (constraints.maxWidth - 12) / 2;
+              return Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: <Widget>[
+                  SizedBox(
+                    width: cardWidth,
+                    child: _StatusSummaryCard(
+                      icon: Icons.school_outlined,
+                      color: Theme.of(context).colorScheme.primary,
+                      title: '背诵覆盖',
+                      valueLabel: '$studyCards / $totalCards',
+                      subtitle: draftCards == 0
+                          ? '所有卡片都已加入背诵队列。'
+                          : '还有 $draftCards 张草稿未加入背诵，可以先检查内容再启用。',
+                      progress: studyRatio,
+                    ),
+                  ),
+                  SizedBox(
+                    width: cardWidth,
+                    child: _NextDueCard(nextDueAt: nextDueAt),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 18),
+          const _SectionHeader(
+            title: '未来 7 天',
+            subtitle: '按到期日期预估近期复习负载，方便提前判断压力。',
+          ),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: <Widget>[
+                  for (final _UpcomingLoad load in upcomingLoads)
+                    _UpcomingLoadRow(load: load),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          const _SectionHeader(
+            title: '牌组分布',
+            subtitle: '优先处理待复习数量高的牌组，避免积压集中爆发。',
+          ),
+          if (deckDueSummaries.isEmpty)
+            const _InfoPanel(
+              icon: Icons.inbox_outlined,
+              title: '暂无卡片分布',
+              subtitle: '创建卡片并加入背诵后，这里会显示各牌组的复习负载。',
+            )
+          else
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: <Widget>[
+                    for (final _DeckDueSummary summary in deckDueSummaries.take(
+                      6,
+                    ))
+                      _DeckDueRow(summary: summary),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeckDueSummary {
+  const _DeckDueSummary({
+    required this.deck,
+    required this.dueCount,
+    required this.cardCount,
+  });
+
+  final DeckModel deck;
+  final int dueCount;
+  final int cardCount;
+}
+
+class _UpcomingLoad {
+  const _UpcomingLoad({
+    required this.day,
+    required this.label,
+    required this.count,
+    required this.maxCount,
+  });
+
+  final DateTime day;
+  final String label;
+  final int count;
+  final int maxCount;
+}
+
+List<_UpcomingLoad> _buildUpcomingLoads(List<CardModel> cards, DateTime now) {
+  final DateTime today = DateTime(now.year, now.month, now.day);
+  final List<int> counts = List<int>.filled(7, 0);
+  for (final CardModel card in cards) {
+    if (!card.studyEnabled) {
+      continue;
+    }
+    final DateTime due = card.state.dueDate.toLocal();
+    final DateTime dueDay = DateTime(due.year, due.month, due.day);
+    final int offset = dueDay.difference(today).inDays;
+    if (offset < 0 || offset >= counts.length) {
+      continue;
+    }
+    counts[offset] += 1;
+  }
+  final int maxCount = counts.fold<int>(
+    1,
+    (int current, int value) => value > current ? value : current,
+  );
+  return <_UpcomingLoad>[
+    for (int index = 0; index < counts.length; index += 1)
+      _UpcomingLoad(
+        day: today.add(Duration(days: index)),
+        label: index == 0
+            ? '今天'
+            : index == 1
+            ? '明天'
+            : DateFormat('MM-dd').format(today.add(Duration(days: index))),
+        count: counts[index],
+        maxCount: maxCount,
+      ),
+  ];
+}
+
+class _NextDueCard extends StatelessWidget {
+  const _NextDueCard({required this.nextDueAt});
+
+  final DateTime? nextDueAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: <Widget>[
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.secondaryContainer,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(
+                Icons.event_available_outlined,
+                color: theme.colorScheme.secondary,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('下一张到期', style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 4),
+                  Text(
+                    nextDueAt == null ? '暂无未来到期卡片' : _formatDateTime(nextDueAt),
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UpcomingLoadRow extends StatelessWidget {
+  const _UpcomingLoadRow({required this.load});
+
+  final _UpcomingLoad load;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final double progress = load.maxCount == 0 ? 0 : load.count / load.maxCount;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: <Widget>[
+          SizedBox(width: 54, child: Text(load.label)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(
+                value: progress.clamp(0, 1),
+                minHeight: 10,
+                backgroundColor: theme.colorScheme.surfaceContainerHighest,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 42,
+            child: Text(
+              '${load.count}',
+              textAlign: TextAlign.end,
+              style: theme.textTheme.labelLarge,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeckDueRow extends StatelessWidget {
+  const _DeckDueRow({required this.summary});
+
+  final _DeckDueSummary summary;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final double progress = summary.cardCount == 0
+        ? 0
+        : summary.dueCount / summary.cardCount;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: _parseDeckColor(
+                summary.deck.colorHex,
+                theme,
+              ).withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              _deckIconFor(summary.deck.icon),
+              size: 19,
+              color: _parseDeckColor(summary.deck.colorHex, theme),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(summary.deck.name, style: theme.textTheme.titleSmall),
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: progress.clamp(0, 1),
+                    minHeight: 8,
+                    backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            '${summary.dueCount}/${summary.cardCount}',
+            style: theme.textTheme.labelLarge,
           ),
         ],
       ),
@@ -2203,22 +3795,24 @@ class _ReviewRatingButton extends StatelessWidget {
   const _ReviewRatingButton({
     required this.icon,
     required this.label,
-    required this.hint,
+    required this.description,
     required this.color,
     required this.onPressed,
+    this.loading = false,
   });
 
   final IconData icon;
   final String label;
-  final String hint;
+  final String description;
   final Color color;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
+  final bool loading;
 
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     return Tooltip(
-      message: hint,
+      message: '$label：$description',
       child: FilledButton(
         onPressed: onPressed,
         style: FilledButton.styleFrom(
@@ -2227,28 +3821,52 @@ class _ReviewRatingButton extends StatelessWidget {
           foregroundColor: color,
           disabledBackgroundColor: color.withValues(alpha: 0.08),
           disabledForegroundColor: color.withValues(alpha: 0.5),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-          minimumSize: const Size.fromHeight(48),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          minimumSize: const Size.fromHeight(64),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
             side: BorderSide(color: color.withValues(alpha: 0.18)),
           ),
         ),
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.start,
           children: <Widget>[
-            Icon(icon, size: 18),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelLarge?.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.1,
-                ),
+            loading
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(color),
+                    ),
+                  )
+                : Icon(icon, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: color.withValues(alpha: 0.86),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -2267,6 +3885,7 @@ class _DeckCardListItem extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.onLongPress,
+    this.onToggleStudyEnabled,
   });
 
   final CardModel card;
@@ -2274,6 +3893,7 @@ class _DeckCardListItem extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final VoidCallback? onToggleStudyEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -2339,6 +3959,23 @@ class _DeckCardListItem extends StatelessWidget {
                       ),
                     ],
                     if (!selectionMode) ...<Widget>[
+                      const SizedBox(width: 4),
+                      Tooltip(
+                        message: card.studyEnabled ? '移出背诵' : '加入背诵',
+                        child: InkResponse(
+                          onTap: onToggleStudyEnabled,
+                          radius: 20,
+                          child: Icon(
+                            card.studyEnabled
+                                ? Icons.bookmark_added_outlined
+                                : Icons.bookmark_add_outlined,
+                            size: 18,
+                            color: card.studyEnabled
+                                ? theme.colorScheme.primary
+                                : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
                       const SizedBox(width: 2),
                       Icon(
                         Icons.chevron_right_rounded,
@@ -2606,6 +4243,8 @@ class _EmptyStateCard extends StatelessWidget {
     required this.onPrimaryAction,
     this.secondaryActionLabel,
     this.onSecondaryAction,
+    this.tertiaryActionLabel,
+    this.onTertiaryAction,
   });
 
   final IconData icon;
@@ -2615,6 +4254,8 @@ class _EmptyStateCard extends StatelessWidget {
   final VoidCallback onPrimaryAction;
   final String? secondaryActionLabel;
   final VoidCallback? onSecondaryAction;
+  final String? tertiaryActionLabel;
+  final VoidCallback? onTertiaryAction;
 
   @override
   Widget build(BuildContext context) {
@@ -2662,6 +4303,11 @@ class _EmptyStateCard extends StatelessWidget {
                   OutlinedButton(
                     onPressed: onSecondaryAction,
                     child: Text(secondaryActionLabel!),
+                  ),
+                if (tertiaryActionLabel != null && onTertiaryAction != null)
+                  TextButton(
+                    onPressed: onTertiaryAction,
+                    child: Text(tertiaryActionLabel!),
                   ),
               ],
             ),
@@ -3027,6 +4673,125 @@ class _MetaChip extends StatelessWidget {
   }
 }
 
+class _FolderDeckSection extends ConsumerWidget {
+  const _FolderDeckSection({
+    required this.folder,
+    required this.decks,
+    required this.dueCount,
+    required this.onEdit,
+    required this.onCreateDeck,
+  });
+
+  final FolderModel folder;
+  final List<DeckModel> decks;
+  final int dueCount;
+  final VoidCallback onEdit;
+  final VoidCallback onCreateDeck;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final AppState state = ref.watch(appStoreProvider);
+    final ThemeData theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    Icons.folder_copy_outlined,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(folder.name, style: theme.textTheme.titleLarge),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: <Widget>[
+                          _MetaChip(label: '牌组 ${decks.length}'),
+                          _MetaChip(label: '待复习 $dueCount'),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  onPressed: onEdit,
+                  icon: const Icon(Icons.more_horiz_rounded),
+                  tooltip: '文件夹设置',
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (decks.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerLowest,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: theme.colorScheme.outlineVariant),
+                ),
+                child: Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Text(
+                        '这个文件夹里还没有牌组，可以直接在这里创建一个。',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton.icon(
+                      onPressed: onCreateDeck,
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('新建牌组'),
+                    ),
+                  ],
+                ),
+              )
+            else ...<Widget>[
+              for (final DeckModel deck in decks)
+                _DeckSummaryCard(
+                  deck: deck,
+                  cardCount: state.cardCountForDeck(deck.id),
+                  dueCount: state.dueCountForDeck(deck.id),
+                  onTap: () => context.go('/deck/${deck.id}'),
+                ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: onCreateDeck,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('在该文件夹中创建牌组'),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DeckSummaryCard extends StatelessWidget {
   const _DeckSummaryCard({
     required this.deck,
@@ -3283,6 +5048,17 @@ String _formatDateTime(DateTime? value) {
   return DateFormat('yyyy-MM-dd HH:mm').format(value.toLocal());
 }
 
+String _formatFileSize(int bytes) {
+  if (bytes < 1024) {
+    return '$bytes B';
+  }
+  final double kb = bytes / 1024;
+  if (kb < 1024) {
+    return '${kb.toStringAsFixed(1)} KB';
+  }
+  return '${(kb / 1024).toStringAsFixed(1)} MB';
+}
+
 String _deckCardListTitle(CardModel card) {
   final List<String> candidates = <String>[
     card.title,
@@ -3355,7 +5131,7 @@ String _syncOperationTitle(String type) {
     case 'delete_card':
       return '待删除卡片';
     case 'submit_review':
-      return '待同步复习结果';
+      return '旧版待同步复习结果';
     default:
       return '待同步操作';
   }
@@ -3370,7 +5146,7 @@ String _syncOperationSummary(SyncOperation operation) {
     case 'delete_card':
       return '待从服务端删除对应卡片。';
     case 'submit_review':
-      return '本次评分已离线保存，稍后将自动补交。';
+      return '旧版本地评分记录，建议联网后重新确认复习状态。';
     default:
       return '等待网络恢复后自动处理。';
   }

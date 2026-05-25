@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"sort"
 	"testing"
 	"time"
 
@@ -324,10 +325,11 @@ func TestDueCardsPrioritizesLearningAndAppliesDeckLimits(t *testing.T) {
 	now := time.Now().UTC()
 	mustCreate := func(id string, state model.FSRSState, createdAt time.Time) {
 		card, err := service.CreateCard(user.ID, deck.ID, model.Card{
-			ClientID: id,
-			Title:    id,
-			Content:  id,
-			State:    state,
+			ClientID:     id,
+			Title:        id,
+			Content:      id,
+			StudyEnabled: true,
+			State:        state,
 		})
 		if err != nil {
 			t.Fatalf("create card %s: %v", id, err)
@@ -453,5 +455,129 @@ func TestSyncPushSubmitReviewUsesOccurredAt(t *testing.T) {
 	}
 	if !updated.UpdatedAt.Equal(reviewedAt) {
 		t.Fatalf("expected updated_at to use occurred_at, got %s want %s", updated.UpdatedAt, reviewedAt)
+	}
+}
+
+func TestDueCardsExcludeCardsNotInStudyList(t *testing.T) {
+	service := newTestAppService(t)
+	user := registerTestUser(t, service, "study-toggle@example.com")
+	deckID := firstDeckID(t, service, user.ID)
+
+	if _, err := service.CreateCard(user.ID, deckID, model.Card{
+		ClientID:     "study-off",
+		Title:        "Not in review",
+		Content:      "Prompt",
+		StudyEnabled: false,
+	}); err != nil {
+		t.Fatalf("create non-study card: %v", err)
+	}
+	if _, err := service.CreateCard(user.ID, deckID, model.Card{
+		ClientID:     "study-on",
+		Title:        "In review",
+		Content:      "Prompt",
+		StudyEnabled: true,
+	}); err != nil {
+		t.Fatalf("create study card: %v", err)
+	}
+
+	queue := service.DueCards(user.ID, deckID)
+	if len(queue) != 1 {
+		t.Fatalf("expected exactly one due card in study list, got %d", len(queue))
+	}
+	if queue[0].ClientID != "study-on" {
+		t.Fatalf("expected study-enabled card to remain, got %+v", queue[0])
+	}
+}
+
+func TestDeckSpecificDueCardsRespectRandomReviewOrder(t *testing.T) {
+	service := newTestAppService(t)
+	user := registerTestUser(t, service, "random-order@example.com")
+	deckID := firstDeckID(t, service, user.ID)
+
+	deck, err := service.GetDeck(user.ID, deckID)
+	if err != nil {
+		t.Fatalf("get deck: %v", err)
+	}
+	if _, err := service.UpdateDeck(user.ID, deck.ID, model.Deck{
+		Name:             deck.Name,
+		Description:      deck.Description,
+		Color:            deck.Color,
+		Icon:             deck.Icon,
+		ReviewOrder:      ReviewOrderRandom,
+		NewCardsPerDay:   deck.NewCardsPerDay,
+		MaxReviewsPerDay: deck.MaxReviewsPerDay,
+	}); err != nil {
+		t.Fatalf("update deck order: %v", err)
+	}
+
+	for _, clientID := range []string{"card-a", "card-b", "card-c"} {
+		if _, err := service.CreateCard(user.ID, deckID, model.Card{
+			ClientID:     clientID,
+			Title:        clientID,
+			Content:      "Prompt",
+			StudyEnabled: true,
+		}); err != nil {
+			t.Fatalf("create %s: %v", clientID, err)
+		}
+	}
+
+	queue := service.DueCards(user.ID, deckID)
+	if len(queue) != 3 {
+		t.Fatalf("expected three due cards, got %d", len(queue))
+	}
+
+	got := []string{queue[0].ClientID, queue[1].ClientID, queue[2].ClientID}
+	expected := append([]model.Card(nil), queue...)
+	dayKey := reviewDayKey(time.Now())
+	sort.Slice(expected, func(i, j int) bool {
+		return stableReviewOrderValue(deckID, dayKey, "new", expected[i].ID) <
+			stableReviewOrderValue(deckID, dayKey, "new", expected[j].ID)
+	})
+	want := []string{expected[0].ClientID, expected[1].ClientID, expected[2].ClientID}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("unexpected random order at %d: got %v want %v", index, got, want)
+		}
+	}
+}
+
+func TestDeleteFolderKeepsDecksAndClearsFolderID(t *testing.T) {
+	service := newTestAppService(t)
+	user := registerTestUser(t, service, "folder-delete@example.com")
+
+	folder, err := service.CreateFolder(user.ID, model.Folder{Name: "语言学习"})
+	if err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+
+	deck, err := service.CreateDeck(user.ID, model.Deck{
+		Name:             "英语",
+		Description:      "Deck in folder",
+		Color:            "#4ECDC4",
+		Icon:             "📚",
+		FolderID:         folder.ID,
+		ReviewOrder:      ReviewOrderSequential,
+		NewCardsPerDay:   20,
+		MaxReviewsPerDay: 200,
+	})
+	if err != nil {
+		t.Fatalf("create deck in folder: %v", err)
+	}
+
+	if err := service.DeleteFolder(user.ID, folder.ID); err != nil {
+		t.Fatalf("delete folder: %v", err)
+	}
+
+	updatedDeck, err := service.GetDeck(user.ID, deck.ID)
+	if err != nil {
+		t.Fatalf("get deck after folder delete: %v", err)
+	}
+	if updatedDeck.FolderID != "" {
+		t.Fatalf("expected folder id to be cleared, got %q", updatedDeck.FolderID)
+	}
+
+	decks := service.ListDecks(user.ID)
+	if len(decks) < 2 {
+		t.Fatalf("expected default deck plus retained deck, got %d", len(decks))
 	}
 }

@@ -43,6 +43,57 @@ class ApiClient {
     return _requireMap(response.data, '/auth/login');
   }
 
+  Future<List<Map<String, dynamic>>> listFolders(String token) async {
+    final Response<dynamic> response = await _dio.get<dynamic>(
+      '/folders',
+      options: Options(
+        headers: <String, String>{'Authorization': 'Bearer $token'},
+      ),
+    );
+    return _toMapList(response.data, 'items');
+  }
+
+  Future<Map<String, dynamic>> createFolder({
+    required String token,
+    required Map<String, dynamic> payload,
+  }) async {
+    final Response<dynamic> response = await _dio.post<dynamic>(
+      '/folders',
+      data: payload,
+      options: Options(
+        headers: <String, String>{'Authorization': 'Bearer $token'},
+      ),
+    );
+    return _requireMap(response.data, '/folders');
+  }
+
+  Future<Map<String, dynamic>> updateFolder({
+    required String token,
+    required String folderId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final Response<dynamic> response = await _dio.put<dynamic>(
+      '/folders/$folderId',
+      data: payload,
+      options: Options(
+        headers: <String, String>{'Authorization': 'Bearer $token'},
+      ),
+    );
+    return _requireMap(response.data, '/folders/$folderId');
+  }
+
+  Future<void> deleteFolder({
+    required String token,
+    required String folderId,
+  }) async {
+    await _dio.delete<void>(
+      '/folders/$folderId',
+      options: Options(
+        headers: <String, String>{'Authorization': 'Bearer $token'},
+      ),
+    );
+  }
+
   Future<List<Map<String, dynamic>>> listDecks(String token) async {
     final Response<dynamic> response = await _dio.get<dynamic>(
       '/decks',
@@ -229,6 +280,57 @@ class ApiClient {
       ),
     );
     return _toMapList(response.data, 'items');
+  }
+
+  Future<Map<String, dynamic>> generateCardsFromFile({
+    required String token,
+    required String filename,
+    required List<int> bytes,
+    required String topic,
+    required int cardCount,
+    required String difficulty,
+    required List<String> cardTypes,
+  }) async {
+    final FormData formData = FormData.fromMap(<String, dynamic>{
+      'file': MultipartFile.fromBytes(bytes, filename: filename),
+      'topic': topic,
+      'card_count': cardCount.toString(),
+      'difficulty': difficulty,
+      'card_types': cardTypes.join(','),
+      'strategy': 'fsrs_friendly',
+    });
+    final Response<dynamic> response = await _dio.post<dynamic>(
+      '/ai/import-file',
+      data: formData,
+      options: Options(
+        headers: <String, String>{'Authorization': 'Bearer $token'},
+      ),
+    );
+    return _requireMap(response.data, '/ai/import-file');
+  }
+
+  Future<List<Map<String, dynamic>>> rewriteCardWithAI({
+    required String token,
+    required String title,
+    required String content,
+    required String rewriteType,
+    required String instruction,
+    String? cardId,
+  }) async {
+    final Response<dynamic> response = await _dio.post<dynamic>(
+      '/ai/rewrite-card',
+      data: <String, dynamic>{
+        'card_id': cardId,
+        'title': title,
+        'content': content,
+        'rewrite_type': rewriteType,
+        'instruction': instruction,
+      },
+      options: Options(
+        headers: <String, String>{'Authorization': 'Bearer $token'},
+      ),
+    );
+    return _toMapList(response.data, 'candidates');
   }
 
   List<Map<String, dynamic>> _toMapList(dynamic data, String field) {

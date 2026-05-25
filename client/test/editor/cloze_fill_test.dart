@@ -58,4 +58,23 @@ void main() {
 
     expect(find.text('80'), findsOneWidget);
   });
+
+  testWidgets('cloze blank keeps roughly the selected text width', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: DslCardView(front: '今天学 {{钙}}。', back: '', revealed: false),
+        ),
+      ),
+    );
+
+    final Size blankSize = tester.getSize(
+      find.byKey(const ValueKey<String>('dsl_cloze_blank')),
+    );
+
+    expect(blankSize.width, lessThan(44));
+    expect(blankSize.width, greaterThanOrEqualTo(16));
+  });
 }

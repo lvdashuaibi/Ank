@@ -16,6 +16,7 @@ var ErrNotFound = errors.New("not found")
 type MemoryStore struct {
 	mu         sync.RWMutex
 	users      map[string]model.User
+	folders    map[string]model.Folder
 	decks      map[string]model.Deck
 	cards      map[string]model.Card
 	reviewLogs []model.ReviewLog
@@ -24,6 +25,7 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		users:      make(map[string]model.User),
+		folders:    make(map[string]model.Folder),
 		decks:      make(map[string]model.Deck),
 		cards:      make(map[string]model.Card),
 		reviewLogs: make([]model.ReviewLog, 0),
@@ -56,6 +58,65 @@ func (s *MemoryStore) GetUser(id string) (model.User, error) {
 		return model.User{}, ErrNotFound
 	}
 	return user, nil
+}
+
+func (s *MemoryStore) ListFolders(userID string) []model.Folder {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	folders := make([]model.Folder, 0)
+	for _, folder := range s.folders {
+		if folder.UserID == userID {
+			folders = append(folders, folder)
+		}
+	}
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].CreatedAt.Before(folders[j].CreatedAt)
+	})
+	return folders
+}
+
+func (s *MemoryStore) CreateFolder(folder model.Folder) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.folders[folder.ID] = folder
+	return nil
+}
+
+func (s *MemoryStore) GetFolder(userID, folderID string) (model.Folder, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	folder, ok := s.folders[folderID]
+	if !ok || folder.UserID != userID {
+		return model.Folder{}, ErrNotFound
+	}
+	return folder, nil
+}
+
+func (s *MemoryStore) UpdateFolder(folder model.Folder) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.folders[folder.ID] = folder
+	return nil
+}
+
+func (s *MemoryStore) DeleteFolder(userID, folderID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	folder, ok := s.folders[folderID]
+	if !ok || folder.UserID != userID {
+		return ErrNotFound
+	}
+	delete(s.folders, folderID)
+	now := time.Now()
+	for id, deck := range s.decks {
+		if deck.UserID != userID || deck.FolderID != folderID {
+			continue
+		}
+		deck.FolderID = ""
+		deck.UpdatedAt = now
+		s.decks[id] = deck
+	}
+	return nil
 }
 
 func (s *MemoryStore) ListDecks(userID string) []model.Deck {
@@ -192,6 +253,9 @@ func (s *MemoryStore) ListDueCards(userID string, deckID string, now time.Time) 
 			continue
 		}
 		if deckID != "" && card.DeckID != deckID {
+			continue
+		}
+		if !card.StudyEnabled {
 			continue
 		}
 		if !card.State.DueDate.After(now) {

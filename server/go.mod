@@ -1,12 +1,13 @@
 module github.com/ank/flashcard-server
 
-go 1.23.0
+go 1.26
 
 require (
 	github.com/gin-gonic/gin v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.6
+	github.com/open-spaced-repetition/go-fsrs/v4 v4.0.0-20260415025435-7ef182b5749d
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.39.0
 )

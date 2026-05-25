@@ -10,6 +10,11 @@ type Store interface {
 	CreateUser(user model.User) error
 	FindUserByEmail(email string) (model.User, bool)
 	GetUser(id string) (model.User, error)
+	ListFolders(userID string) []model.Folder
+	CreateFolder(folder model.Folder) error
+	GetFolder(userID, folderID string) (model.Folder, error)
+	UpdateFolder(folder model.Folder) error
+	DeleteFolder(userID, folderID string) error
 	ListDecks(userID string) []model.Deck
 	CreateDeck(deck model.Deck) error
 	GetDeck(userID, deckID string) (model.Deck, error)

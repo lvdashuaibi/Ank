@@ -941,17 +941,20 @@ class _DslClozeFieldState extends State<_DslClozeField> {
     final String answer = widget.node.answers.isNotEmpty
         ? widget.node.answers.first
         : '';
-    final double estimatedWidth =
-        (answer.isEmpty ? 4 : answer.length * 2.4) *
-        ((theme.textTheme.bodyMedium?.fontSize ?? 14) + 2);
+    final TextStyle textStyle =
+        theme.textTheme.bodyMedium ?? const TextStyle(fontSize: 14);
+    final double measuredWidth = _measureInlineTextWidth(
+      answer.isEmpty ? '  ' : answer,
+      textStyle,
+      Directionality.of(context),
+    );
+    final double blankWidth = (measuredWidth + 4).clamp(16, 220);
 
     Widget buildUnderlineBox({required Widget child, required bool revealed}) {
       return Container(
         key: revealed ? null : const ValueKey<String>('dsl_cloze_blank'),
-        constraints: BoxConstraints(
-          minWidth: estimatedWidth.clamp(56, 220),
-          minHeight: 28,
-        ),
+        width: blankWidth,
+        constraints: const BoxConstraints(minHeight: 28),
         margin: const EdgeInsets.symmetric(horizontal: 2),
         alignment: Alignment.centerLeft,
         decoration: BoxDecoration(
@@ -1003,6 +1006,19 @@ class _DslClozeFieldState extends State<_DslClozeField> {
       ),
     );
   }
+}
+
+double _measureInlineTextWidth(
+  String text,
+  TextStyle style,
+  TextDirection textDirection,
+) {
+  final TextPainter painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: textDirection,
+    maxLines: 1,
+  )..layout();
+  return painter.width;
 }
 
 class _DslAnswerBlankField extends StatefulWidget {

@@ -70,3 +70,41 @@ func TestMemoryStoreDeleteDeckRemovesCardsAndReviewLogs(t *testing.T) {
 		t.Fatalf("expected review logs to be removed with deck delete, got %d", len(store.reviewLogs))
 	}
 }
+
+func TestMemoryStoreDeleteFolderUnassignsDecks(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Now()
+
+	if err := store.CreateFolder(model.Folder{
+		ID:        "folder-1",
+		UserID:    "user-1",
+		Name:      "Folder",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	if err := store.CreateDeck(model.Deck{
+		ID:          "deck-1",
+		UserID:      "user-1",
+		FolderID:    "folder-1",
+		Name:        "Deck",
+		ReviewOrder: "sequential",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("create deck: %v", err)
+	}
+
+	if err := store.DeleteFolder("user-1", "folder-1"); err != nil {
+		t.Fatalf("delete folder: %v", err)
+	}
+
+	deck, err := store.GetDeck("user-1", "deck-1")
+	if err != nil {
+		t.Fatalf("get deck after deleting folder: %v", err)
+	}
+	if deck.FolderID != "" {
+		t.Fatalf("expected folder id to be cleared, got %q", deck.FolderID)
+	}
+}

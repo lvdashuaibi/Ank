@@ -4,6 +4,9 @@ import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 
 class LocalCache {
+  LocalCache({this.databaseName = 'flashcard_app.db'});
+
+  final String databaseName;
   Database? _database;
 
   Future<Database> get database async {
@@ -13,8 +16,8 @@ class LocalCache {
     }
     final String dbPath = await getDatabasesPath();
     _database = await openDatabase(
-      path.join(dbPath, 'flashcard_app.db'),
-      version: 2,
+      path.join(dbPath, databaseName),
+      version: 4,
       onCreate: (Database db, int version) async {
         await _createTables(db);
       },
@@ -29,9 +32,60 @@ class LocalCache {
             )
           ''');
         }
+        if (oldVersion < 3) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS app_meta (
+              key TEXT PRIMARY KEY,
+              payload TEXT NOT NULL
+            )
+          ''');
+        }
+        if (oldVersion < 4) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS folders (
+              id TEXT PRIMARY KEY,
+              payload TEXT NOT NULL
+            )
+          ''');
+        }
       },
     );
     return _database!;
+  }
+
+  Future<List<Map<String, dynamic>>> loadFolders() async {
+    final Database db = await database;
+    final List<Map<String, Object?>> rows = await db.query(
+      'folders',
+      orderBy: 'id',
+    );
+    return rows.map(_decodePayload).toList();
+  }
+
+  Future<void> replaceFolders(List<Map<String, dynamic>> folders) async {
+    final Database db = await database;
+    await db.transaction((Transaction txn) async {
+      await txn.delete('folders');
+      for (final Map<String, dynamic> folder in folders) {
+        await txn.insert('folders', <String, Object?>{
+          'id': folder['id'] as String,
+          'payload': jsonEncode(folder),
+        });
+      }
+    });
+  }
+
+  Future<void> upsertFolder(Map<String, dynamic> folder) async {
+    final Database db = await database;
+    await db.insert('folders', <String, Object?>{
+      'id': folder['id'] as String,
+      'payload': jsonEncode(folder),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> deleteFolder(String folderId) async {
+    final Database db = await database;
+    await db.delete('folders', where: 'id = ?', whereArgs: <Object?>[folderId]);
   }
 
   Future<List<Map<String, dynamic>>> loadDecks() async {
@@ -125,7 +179,9 @@ class LocalCache {
     final Database db = await database;
     await db.delete('cards');
     await db.delete('decks');
+    await db.delete('folders');
     await db.delete('sync_operations');
+    await db.delete('app_meta');
   }
 
   Future<void> enqueueSyncOperation({
@@ -192,6 +248,53 @@ class LocalCache {
     );
   }
 
+  Future<Map<String, dynamic>?> loadDailyProgress() async {
+    final Database db = await database;
+    final List<Map<String, Object?>> rows = await db.query(
+      'app_meta',
+      columns: const <String>['payload'],
+      where: 'key = ?',
+      whereArgs: const <Object?>['daily_progress'],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return null;
+    }
+    return _decodePayload(rows.first);
+  }
+
+  Future<void> saveDailyProgress(Map<String, dynamic> progress) async {
+    final Database db = await database;
+    await db.insert('app_meta', <String, Object?>{
+      'key': 'daily_progress',
+      'payload': jsonEncode(progress),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> clearDailyProgress() async {
+    final Database db = await database;
+    await db.delete(
+      'app_meta',
+      where: 'key = ?',
+      whereArgs: const <Object?>['daily_progress'],
+    );
+  }
+
+  Future<void> close() async {
+    final Database? db = _database;
+    if (db == null) {
+      return;
+    }
+    await db.close();
+    _database = null;
+  }
+
+  Future<void> deleteDatabaseFile() async {
+    await close();
+    final String dbPath = await getDatabasesPath();
+    await deleteDatabase(path.join(dbPath, databaseName));
+  }
+
   Map<String, dynamic> _decodePayload(Map<String, Object?> row) {
     final dynamic decoded = jsonDecode(row['payload']! as String);
     if (decoded is Map) {
@@ -201,6 +304,12 @@ class LocalCache {
   }
 
   Future<void> _createTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE folders (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+      )
+    ''');
     await db.execute('''
       CREATE TABLE decks (
         id TEXT PRIMARY KEY,
@@ -220,6 +329,12 @@ class LocalCache {
         operation_type TEXT NOT NULL,
         payload TEXT NOT NULL,
         created_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE app_meta (
+        key TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
       )
     ''');
   }

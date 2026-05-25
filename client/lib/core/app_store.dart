@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,10 +12,61 @@ import 'fsrs_scheduler.dart';
 import 'import/card_dsl_parser.dart';
 import 'network/api_client.dart';
 
-export 'fsrs_scheduler.dart' show FsrsScheduler, FsrsState, ReviewRating;
+export 'fsrs_scheduler.dart' show FsrsState, ReviewRating;
 
 final StateNotifierProvider<AppStore, AppState> appStoreProvider =
     StateNotifierProvider<AppStore, AppState>((Ref ref) => AppStore());
+
+enum DeckReviewOrder {
+  sequential('sequential', '顺序'),
+  random('random', '随机');
+
+  const DeckReviewOrder(this.rawValue, this.label);
+
+  final String rawValue;
+  final String label;
+
+  static DeckReviewOrder fromJson(dynamic value) {
+    final String normalized = (value ?? '').toString().trim().toLowerCase();
+    return switch (normalized) {
+      'random' => DeckReviewOrder.random,
+      _ => DeckReviewOrder.sequential,
+    };
+  }
+}
+
+class FolderModel {
+  const FolderModel({
+    required this.id,
+    required this.name,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final String name;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  factory FolderModel.fromJson(Map<String, dynamic> json) {
+    final DateTime now = DateTime.now();
+    return FolderModel(
+      id: (json['id'] ?? '') as String,
+      name: (json['name'] ?? '') as String,
+      createdAt: _parseDate(json['created_at']) ?? now,
+      updatedAt: _parseDate(json['updated_at']) ?? now,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'name': name,
+      'created_at': createdAt.toIso8601String(),
+      'updated_at': updatedAt.toIso8601String(),
+    };
+  }
+}
 
 class DeckModel {
   const DeckModel({
@@ -23,25 +75,32 @@ class DeckModel {
     required this.description,
     required this.icon,
     required this.colorHex,
+    this.folderId,
+    this.reviewOrder = DeckReviewOrder.sequential,
     this.newCardsPerDay = 20,
     this.maxReviewsPerDay = 200,
   });
 
   final String id;
+  final String? folderId;
   final String name;
   final String description;
   final String icon;
   final String colorHex;
+  final DeckReviewOrder reviewOrder;
   final int newCardsPerDay;
   final int maxReviewsPerDay;
 
   factory DeckModel.fromJson(Map<String, dynamic> json) {
+    final String rawFolderId = (json['folder_id'] ?? '') as String;
     return DeckModel(
       id: json['id'] as String,
+      folderId: rawFolderId.trim().isEmpty ? null : rawFolderId.trim(),
       name: (json['name'] ?? '') as String,
       description: (json['description'] ?? '') as String,
       icon: (json['icon'] ?? '📚') as String,
       colorHex: (json['color'] ?? '#4ECDC4') as String,
+      reviewOrder: DeckReviewOrder.fromJson(json['review_order']),
       newCardsPerDay: (json['new_cards_per_day'] as num?)?.toInt() ?? 20,
       maxReviewsPerDay: (json['max_reviews_per_day'] as num?)?.toInt() ?? 200,
     );
@@ -50,10 +109,12 @@ class DeckModel {
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'id': id,
+      'folder_id': folderId,
       'name': name,
       'description': description,
       'icon': icon,
       'color': colorHex,
+      'review_order': reviewOrder.rawValue,
       'new_cards_per_day': newCardsPerDay,
       'max_reviews_per_day': maxReviewsPerDay,
     };
@@ -72,6 +133,7 @@ class CardModel {
     required this.createdAt,
     required this.updatedAt,
     required this.state,
+    this.studyEnabled = false,
   });
 
   final String id;
@@ -84,6 +146,7 @@ class CardModel {
   final DateTime createdAt;
   final DateTime updatedAt;
   final FsrsState state;
+  final bool studyEnabled;
 
   String get prompt => CardDocumentCodec.parse(content).prompt;
   String get answer => CardDocumentCodec.parse(content).answer;
@@ -109,6 +172,7 @@ class CardModel {
           .map((dynamic item) => item.toString())
           .toList(),
       note: (json['note'] ?? '') as String,
+      studyEnabled: json['study_enabled'] == true,
       createdAt: _parseDate(json['created_at']) ?? DateTime.now(),
       updatedAt: _parseDate(json['updated_at']) ?? DateTime.now(),
       state: FsrsState(
@@ -160,6 +224,7 @@ class CardModel {
       'back': parts.answer,
       'tags': tags,
       'note': note,
+      'study_enabled': studyEnabled,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
       'state': <String, dynamic>{
@@ -219,12 +284,22 @@ class AIGeneratedCard {
     required this.content,
     required this.tags,
     required this.note,
+    this.cardType = 'basic',
+    this.knowledgePoint = '',
+    this.sourceExcerpt = '',
+    this.sourceLocation = '',
+    this.difficulty = '',
   });
 
   final String title;
   final String content;
   final List<String> tags;
   final String note;
+  final String cardType;
+  final String knowledgePoint;
+  final String sourceExcerpt;
+  final String sourceLocation;
+  final String difficulty;
 
   factory AIGeneratedCard.fromJson(Map<String, dynamic> json) {
     final String content = (json['content'] ?? '') as String;
@@ -243,6 +318,62 @@ class AIGeneratedCard {
           .map((dynamic item) => item.toString())
           .toList(),
       note: (json['note'] ?? '') as String,
+      cardType: (json['card_type'] ?? 'basic') as String,
+      knowledgePoint: (json['knowledge_point'] ?? '') as String,
+      sourceExcerpt: (json['source_excerpt'] ?? '') as String,
+      sourceLocation: (json['source_location'] ?? '') as String,
+      difficulty: (json['difficulty'] ?? '') as String,
+    );
+  }
+}
+
+class AIDocumentSummary {
+  const AIDocumentSummary({
+    required this.title,
+    required this.mimeType,
+    required this.textPreview,
+    required this.textLength,
+    this.pageCount = 0,
+  });
+
+  final String title;
+  final String mimeType;
+  final String textPreview;
+  final int textLength;
+  final int pageCount;
+
+  factory AIDocumentSummary.fromJson(Map<String, dynamic> json) {
+    return AIDocumentSummary(
+      title: (json['title'] ?? '') as String,
+      mimeType: (json['mime_type'] ?? '') as String,
+      textPreview: (json['text_preview'] ?? '') as String,
+      textLength: (json['text_length'] as num?)?.toInt() ?? 0,
+      pageCount: (json['page_count'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+class AIRewriteCandidate {
+  const AIRewriteCandidate({
+    required this.title,
+    required this.content,
+    required this.changeSummary,
+    required this.qualityNotes,
+  });
+
+  final String title;
+  final String content;
+  final String changeSummary;
+  final List<String> qualityNotes;
+
+  factory AIRewriteCandidate.fromJson(Map<String, dynamic> json) {
+    return AIRewriteCandidate(
+      title: (json['title'] ?? '') as String,
+      content: (json['content'] ?? '') as String,
+      changeSummary: (json['change_summary'] ?? '') as String,
+      qualityNotes: ((json['quality_notes'] as List<dynamic>?) ?? <dynamic>[])
+          .map((dynamic item) => item.toString())
+          .toList(),
     );
   }
 }
@@ -251,6 +382,7 @@ class AppState {
   const AppState({
     required this.decks,
     required this.cards,
+    this.folders = const <FolderModel>[],
     required this.completedToday,
     required this.reviewedReviewTodayByDeck,
     required this.introducedNewTodayByDeck,
@@ -258,6 +390,8 @@ class AppState {
     required this.syncInProgress,
     required this.pendingOperations,
     required this.generatedCards,
+    this.generatedDocument,
+    this.rewriteCandidates = const <AIRewriteCandidate>[],
     this.accessToken,
     this.email,
     this.displayName,
@@ -268,6 +402,7 @@ class AppState {
 
   final List<DeckModel> decks;
   final List<CardModel> cards;
+  final List<FolderModel> folders;
   final int completedToday;
   final Map<String, int> reviewedReviewTodayByDeck;
   final Map<String, int> introducedNewTodayByDeck;
@@ -275,6 +410,8 @@ class AppState {
   final bool syncInProgress;
   final List<SyncOperation> pendingOperations;
   final List<AIGeneratedCard> generatedCards;
+  final AIDocumentSummary? generatedDocument;
+  final List<AIRewriteCandidate> rewriteCandidates;
   final String? accessToken;
   final String? email;
   final String? displayName;
@@ -288,6 +425,7 @@ class AppState {
   AppState copyWith({
     List<DeckModel>? decks,
     List<CardModel>? cards,
+    List<FolderModel>? folders,
     int? completedToday,
     Map<String, int>? reviewedReviewTodayByDeck,
     Map<String, int>? introducedNewTodayByDeck,
@@ -295,6 +433,8 @@ class AppState {
     bool? syncInProgress,
     List<SyncOperation>? pendingOperations,
     List<AIGeneratedCard>? generatedCards,
+    AIDocumentSummary? generatedDocument,
+    List<AIRewriteCandidate>? rewriteCandidates,
     String? accessToken,
     String? email,
     String? displayName,
@@ -303,10 +443,12 @@ class AppState {
     String? dailyProgressDayKey,
     bool clearSession = false,
     bool clearError = false,
+    bool clearGeneratedDocument = false,
   }) {
     return AppState(
       decks: decks ?? this.decks,
       cards: cards ?? this.cards,
+      folders: folders ?? this.folders,
       completedToday: completedToday ?? this.completedToday,
       reviewedReviewTodayByDeck:
           reviewedReviewTodayByDeck ?? this.reviewedReviewTodayByDeck,
@@ -316,6 +458,10 @@ class AppState {
       syncInProgress: syncInProgress ?? this.syncInProgress,
       pendingOperations: pendingOperations ?? this.pendingOperations,
       generatedCards: generatedCards ?? this.generatedCards,
+      generatedDocument: clearGeneratedDocument
+          ? null
+          : generatedDocument ?? this.generatedDocument,
+      rewriteCandidates: rewriteCandidates ?? this.rewriteCandidates,
       accessToken: clearSession ? null : accessToken ?? this.accessToken,
       email: clearSession ? null : email ?? this.email,
       displayName: clearSession ? null : displayName ?? this.displayName,
@@ -330,11 +476,22 @@ class AppState {
       ..sort((CardModel a, CardModel b) => a.createdAt.compareTo(b.createdAt));
   }
 
+  List<DeckModel> decksInFolder(String folderId) {
+    return decks.where((DeckModel deck) => deck.folderId == folderId).toList()
+      ..sort((DeckModel a, DeckModel b) => a.name.compareTo(b.name));
+  }
+
+  List<DeckModel> get ungroupedDecks {
+    return decks.where((DeckModel deck) => deck.folderId == null).toList()
+      ..sort((DeckModel a, DeckModel b) => a.name.compareTo(b.name));
+  }
+
   List<CardModel> dueCards({String? deckId}) {
     final _DailyReviewProgress progress = _effectiveDailyProgress(this);
     return _buildDailyReviewQueue(
       decks: decks,
       cards: cards,
+      dayKey: progress.dayKey,
       deckId: deckId,
       reviewedReviewTodayByDeck: progress.reviewedReviewTodayByDeck,
       introducedNewTodayByDeck: progress.introducedNewTodayByDeck,
@@ -348,13 +505,24 @@ class AppState {
 class _DailyReviewProgress {
   const _DailyReviewProgress({
     required this.dayKey,
+    required this.completedToday,
     required this.reviewedReviewTodayByDeck,
     required this.introducedNewTodayByDeck,
   });
 
   final String dayKey;
+  final int completedToday;
   final Map<String, int> reviewedReviewTodayByDeck;
   final Map<String, int> introducedNewTodayByDeck;
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'day_key': dayKey,
+      'completed_today': completedToday,
+      'reviewed_review_today_by_deck': reviewedReviewTodayByDeck,
+      'introduced_new_today_by_deck': introducedNewTodayByDeck,
+    };
+  }
 }
 
 class _DeckQueueSelection {
@@ -374,20 +542,56 @@ _DailyReviewProgress _effectiveDailyProgress(AppState state) {
   if (state.dailyProgressDayKey != todayKey) {
     return _DailyReviewProgress(
       dayKey: todayKey,
+      completedToday: 0,
       reviewedReviewTodayByDeck: const <String, int>{},
       introducedNewTodayByDeck: const <String, int>{},
     );
   }
   return _DailyReviewProgress(
     dayKey: state.dailyProgressDayKey ?? todayKey,
+    completedToday: state.completedToday,
     reviewedReviewTodayByDeck: state.reviewedReviewTodayByDeck,
     introducedNewTodayByDeck: state.introducedNewTodayByDeck,
+  );
+}
+
+_DailyReviewProgress _dailyProgressFromJson(Map<String, dynamic>? json) {
+  final String todayKey = _todayKey();
+  if (json == null) {
+    return _DailyReviewProgress(
+      dayKey: todayKey,
+      completedToday: 0,
+      reviewedReviewTodayByDeck: const <String, int>{},
+      introducedNewTodayByDeck: const <String, int>{},
+    );
+  }
+
+  final String dayKey = (json['day_key'] ?? '').toString();
+  if (dayKey != todayKey) {
+    return _DailyReviewProgress(
+      dayKey: todayKey,
+      completedToday: 0,
+      reviewedReviewTodayByDeck: const <String, int>{},
+      introducedNewTodayByDeck: const <String, int>{},
+    );
+  }
+
+  return _DailyReviewProgress(
+    dayKey: dayKey,
+    completedToday: _coerceInt(json['completed_today']),
+    reviewedReviewTodayByDeck: _coerceIntMap(
+      json['reviewed_review_today_by_deck'],
+    ),
+    introducedNewTodayByDeck: _coerceIntMap(
+      json['introduced_new_today_by_deck'],
+    ),
   );
 }
 
 List<CardModel> _buildDailyReviewQueue({
   required List<DeckModel> decks,
   required List<CardModel> cards,
+  required String dayKey,
   required Map<String, int> reviewedReviewTodayByDeck,
   required Map<String, int> introducedNewTodayByDeck,
   String? deckId,
@@ -400,15 +604,36 @@ List<CardModel> _buildDailyReviewQueue({
     if (!card.state.isDue) {
       continue;
     }
+    if (!card.studyEnabled) {
+      continue;
+    }
     if (deckId != null && card.deckId != deckId) {
       continue;
     }
     grouped.putIfAbsent(card.deckId, () => <CardModel>[]).add(card);
   }
 
-  final Iterable<String> deckIds = deckId == null
-      ? grouped.keys
-      : <String>[deckId];
+  if (deckId != null) {
+    final List<CardModel> deckCards = grouped[deckId] ?? <CardModel>[];
+    if (deckCards.isEmpty) {
+      return <CardModel>[];
+    }
+    final _DeckQueueSelection selection = _selectDeckQueue(
+      deckCards: deckCards,
+      deck: deckById[deckId],
+      dayKey: dayKey,
+      respectDeckOrder: true,
+      reviewedReviewCount: reviewedReviewTodayByDeck[deckId] ?? 0,
+      introducedNewCount: introducedNewTodayByDeck[deckId] ?? 0,
+    );
+    return <CardModel>[
+      ...selection.learningCards,
+      ...selection.reviewCards,
+      ...selection.newCards,
+    ];
+  }
+
+  final Iterable<String> deckIds = grouped.keys;
   final List<CardModel> learningCards = <CardModel>[];
   final List<CardModel> reviewCards = <CardModel>[];
   final List<CardModel> newCards = <CardModel>[];
@@ -421,6 +646,8 @@ List<CardModel> _buildDailyReviewQueue({
     final _DeckQueueSelection selection = _selectDeckQueue(
       deckCards: deckCards,
       deck: deckById[currentDeckId],
+      dayKey: dayKey,
+      respectDeckOrder: false,
       reviewedReviewCount: reviewedReviewTodayByDeck[currentDeckId] ?? 0,
       introducedNewCount: introducedNewTodayByDeck[currentDeckId] ?? 0,
     );
@@ -438,6 +665,8 @@ List<CardModel> _buildDailyReviewQueue({
 _DeckQueueSelection _selectDeckQueue({
   required List<CardModel> deckCards,
   required DeckModel? deck,
+  required String dayKey,
+  required bool respectDeckOrder,
   required int reviewedReviewCount,
   required int introducedNewCount,
 }) {
@@ -466,10 +695,39 @@ _DeckQueueSelection _selectDeckQueue({
     0,
   );
 
+  final List<CardModel> selectedLearning = learningCards;
+  final List<CardModel> selectedReview = reviewCards
+      .take(remainingReviewSlots)
+      .toList();
+  final List<CardModel> selectedNew = newCards.take(remainingNewSlots).toList();
+
+  if (respectDeckOrder &&
+      (deck?.reviewOrder ?? DeckReviewOrder.sequential) ==
+          DeckReviewOrder.random) {
+    _sortCardsByStableRandom(
+      selectedLearning,
+      deckId: deck?.id ?? '',
+      dayKey: dayKey,
+      group: 'learning',
+    );
+    _sortCardsByStableRandom(
+      selectedReview,
+      deckId: deck?.id ?? '',
+      dayKey: dayKey,
+      group: 'review',
+    );
+    _sortCardsByStableRandom(
+      selectedNew,
+      deckId: deck?.id ?? '',
+      dayKey: dayKey,
+      group: 'new',
+    );
+  }
+
   return _DeckQueueSelection(
-    learningCards: learningCards,
-    reviewCards: reviewCards.take(remainingReviewSlots).toList(),
-    newCards: newCards.take(remainingNewSlots).toList(),
+    learningCards: selectedLearning,
+    reviewCards: selectedReview,
+    newCards: selectedNew,
   );
 }
 
@@ -494,6 +752,49 @@ int _compareNewCardPriority(CardModel left, CardModel right) {
   return left.id.compareTo(right.id);
 }
 
+void _sortCardsByStableRandom(
+  List<CardModel> cards, {
+  required String deckId,
+  required String dayKey,
+  required String group,
+}) {
+  cards.sort((CardModel left, CardModel right) {
+    final int leftRank = _stableReviewOrderValue(
+      deckId: deckId,
+      dayKey: dayKey,
+      group: group,
+      cardId: left.id,
+    );
+    final int rightRank = _stableReviewOrderValue(
+      deckId: deckId,
+      dayKey: dayKey,
+      group: group,
+      cardId: right.id,
+    );
+    if (leftRank != rightRank) {
+      return leftRank.compareTo(rightRank);
+    }
+    return left.id.compareTo(right.id);
+  });
+}
+
+int _stableReviewOrderValue({
+  required String deckId,
+  required String dayKey,
+  required String group,
+  required String cardId,
+}) {
+  const int offset = 0x811C9DC5;
+  const int prime = 0x01000193;
+  int hash = offset;
+  final String seed = '$deckId\u0000$dayKey\u0000$group\u0000$cardId';
+  for (final int codeUnit in seed.codeUnits) {
+    hash ^= codeUnit;
+    hash = (hash * prime) & 0x7FFFFFFF;
+  }
+  return hash;
+}
+
 String _todayKey([DateTime? value]) {
   final DateTime now = value ?? DateTime.now();
   final DateTime local = now.toLocal();
@@ -505,7 +806,6 @@ String _todayKey([DateTime? value]) {
 class AppStore extends StateNotifier<AppState> {
   AppStore()
     : _apiClient = ApiClient(),
-      _fsrsScheduler = const FsrsScheduler(),
       _sessionStore = SessionStore(),
       _localCache = LocalCache(),
       _uuid = const Uuid(),
@@ -526,7 +826,6 @@ class AppStore extends StateNotifier<AppState> {
   }
 
   final ApiClient _apiClient;
-  final FsrsScheduler _fsrsScheduler;
   final SessionStore _sessionStore;
   final LocalCache _localCache;
   final Uuid _uuid;
@@ -537,6 +836,7 @@ class AppStore extends StateNotifier<AppState> {
     required String content,
     required String note,
     required List<String> tags,
+    required bool studyEnabled,
   }) {
     final CardDocumentParts parts = CardDocumentCodec.parse(content);
     return <String, dynamic>{
@@ -551,20 +851,33 @@ class AppStore extends StateNotifier<AppState> {
       'back': parts.answer,
       'note': note,
       'tags': tags,
+      'study_enabled': studyEnabled,
     };
   }
 
   Future<void> bootstrap() async {
+    final List<Map<String, dynamic>> folderRows = await _localCache
+        .loadFolders();
     final List<Map<String, dynamic>> deckRows = await _localCache.loadDecks();
     final List<Map<String, dynamic>> cardRows = await _localCache.loadCards();
     final List<Map<String, dynamic>> operationRows = await _localCache
         .loadSyncOperations();
+    final Map<String, dynamic>? dailyProgressRow = await _localCache
+        .loadDailyProgress();
     final StoredSession? session = await _sessionStore.readSession();
+    final _DailyReviewProgress progress = _dailyProgressFromJson(
+      dailyProgressRow,
+    );
 
     state = state.copyWith(
+      folders: folderRows.map(FolderModel.fromJson).toList(),
       decks: deckRows.map(DeckModel.fromJson).toList(),
       cards: cardRows.map(CardModel.fromJson).toList(),
       pendingOperations: operationRows.map(SyncOperation.fromJson).toList(),
+      completedToday: progress.completedToday,
+      reviewedReviewTodayByDeck: progress.reviewedReviewTodayByDeck,
+      introducedNewTodayByDeck: progress.introducedNewTodayByDeck,
+      dailyProgressDayKey: progress.dayKey,
       accessToken: session?.accessToken,
       email: session?.email,
       displayName: session?.displayName,
@@ -577,20 +890,21 @@ class AppStore extends StateNotifier<AppState> {
     }
   }
 
-  void _ensureDailyProgressFresh() {
+  Future<void> _ensureDailyProgressFresh() async {
     final _DailyReviewProgress progress = _effectiveDailyProgress(state);
     if (state.dailyProgressDayKey == progress.dayKey) {
       return;
     }
     state = state.copyWith(
-      completedToday: 0,
-      reviewedReviewTodayByDeck: const <String, int>{},
-      introducedNewTodayByDeck: const <String, int>{},
+      completedToday: progress.completedToday,
+      reviewedReviewTodayByDeck: progress.reviewedReviewTodayByDeck,
+      introducedNewTodayByDeck: progress.introducedNewTodayByDeck,
       dailyProgressDayKey: progress.dayKey,
     );
+    await _localCache.saveDailyProgress(progress.toJson());
   }
 
-  void _recordReviewProgress(CardModel cardBeforeReview) {
+  Future<void> _recordReviewProgress(CardModel cardBeforeReview) async {
     final _DailyReviewProgress progress = _effectiveDailyProgress(state);
     final Map<String, int> reviewedReviewTodayByDeck = Map<String, int>.from(
       progress.reviewedReviewTodayByDeck,
@@ -607,14 +921,20 @@ class AppStore extends StateNotifier<AppState> {
           (introducedNewTodayByDeck[cardBeforeReview.deckId] ?? 0) + 1;
     }
 
-    state = state.copyWith(
-      completedToday: progress.dayKey == state.dailyProgressDayKey
-          ? state.completedToday + 1
-          : 1,
+    final _DailyReviewProgress nextProgress = _DailyReviewProgress(
+      dayKey: progress.dayKey,
+      completedToday: progress.completedToday + 1,
       reviewedReviewTodayByDeck: reviewedReviewTodayByDeck,
       introducedNewTodayByDeck: introducedNewTodayByDeck,
-      dailyProgressDayKey: progress.dayKey,
     );
+
+    state = state.copyWith(
+      completedToday: nextProgress.completedToday,
+      reviewedReviewTodayByDeck: nextProgress.reviewedReviewTodayByDeck,
+      introducedNewTodayByDeck: nextProgress.introducedNewTodayByDeck,
+      dailyProgressDayKey: nextProgress.dayKey,
+    );
+    await _localCache.saveDailyProgress(nextProgress.toJson());
   }
 
   Future<String?> _ensureDeckByName({
@@ -637,6 +957,7 @@ class AppStore extends StateNotifier<AppState> {
         'description': 'Imported from Card DSL',
         'color': '#4ECDC4',
         'icon': '📥',
+        'review_order': DeckReviewOrder.sequential.rawValue,
         'new_cards_per_day': 20,
         'max_reviews_per_day': 200,
       },
@@ -663,7 +984,11 @@ class AppStore extends StateNotifier<AppState> {
       return 0;
     }
 
-    state = state.copyWith(syncInProgress: true, clearError: true);
+    state = state.copyWith(
+      syncInProgress: true,
+      clearError: true,
+      clearGeneratedDocument: true,
+    );
     int imported = 0;
     try {
       for (final CardDslCard card in result.cards) {
@@ -683,6 +1008,7 @@ class AppStore extends StateNotifier<AppState> {
           ),
           note: note,
           tags: card.tags,
+          studyEnabled: false,
         );
         if (ok) {
           imported++;
@@ -715,10 +1041,16 @@ class AppStore extends StateNotifier<AppState> {
       await _saveSessionFromResponse(response);
       await refreshRemoteData();
       return true;
+    } on DioException catch (error) {
+      state = state.copyWith(
+        isBootstrapping: false,
+        errorMessage: _friendlyAuthError(error, action: '注册'),
+      );
+      return false;
     } catch (error) {
       state = state.copyWith(
         isBootstrapping: false,
-        errorMessage: '注册失败：$error',
+        errorMessage: '注册失败，请稍后重试',
       );
       return false;
     }
@@ -734,10 +1066,16 @@ class AppStore extends StateNotifier<AppState> {
       await _saveSessionFromResponse(response);
       await refreshRemoteData();
       return true;
+    } on DioException catch (error) {
+      state = state.copyWith(
+        isBootstrapping: false,
+        errorMessage: _friendlyAuthError(error, action: '登录'),
+      );
+      return false;
     } catch (error) {
       state = state.copyWith(
         isBootstrapping: false,
-        errorMessage: '登录失败：$error',
+        errorMessage: '登录失败，请稍后重试',
       );
       return false;
     }
@@ -760,7 +1098,7 @@ class AppStore extends StateNotifier<AppState> {
   }
 
   Future<void> refreshRemoteData() async {
-    _ensureDailyProgressFresh();
+    await _ensureDailyProgressFresh();
     final String? token = state.accessToken;
     if (token == null || token.isEmpty) {
       return;
@@ -774,6 +1112,7 @@ class AppStore extends StateNotifier<AppState> {
 
     try {
       await syncPendingOperations(token: token);
+      List<Map<String, dynamic>> folderMaps;
       List<Map<String, dynamic>> deckMaps;
       List<Map<String, dynamic>> cardMaps;
 
@@ -784,22 +1123,26 @@ class AppStore extends StateNotifier<AppState> {
         if (!response.containsKey('decks') && !response.containsKey('cards')) {
           throw const FormatException('服务端未返回 decks/cards 数据');
         }
+        folderMaps = _coerceMapList(response['folders']);
         deckMaps = _coerceMapList(response['decks']);
         cardMaps = _coerceMapList(response['cards']);
       } on FormatException {
         final _RemoteSnapshot snapshot = await _fetchRemoteSnapshotFallback(
           token,
         );
+        folderMaps = snapshot.folders;
         deckMaps = snapshot.decks;
         cardMaps = snapshot.cards;
       }
 
+      await _localCache.replaceFolders(folderMaps);
       await _localCache.replaceDecks(deckMaps);
       await _localCache.replaceCards(cardMaps);
       final List<SyncOperation> pendingOperations =
           await _loadPendingOperations();
 
       state = state.copyWith(
+        folders: folderMaps.map(FolderModel.fromJson).toList(),
         decks: deckMaps.map(DeckModel.fromJson).toList(),
         cards: cardMaps.map(CardModel.fromJson).toList(),
         isBootstrapping: false,
@@ -828,6 +1171,9 @@ class AppStore extends StateNotifier<AppState> {
   }
 
   Future<_RemoteSnapshot> _fetchRemoteSnapshotFallback(String token) async {
+    final List<Map<String, dynamic>> folderMaps = await _apiClient.listFolders(
+      token,
+    );
     final List<Map<String, dynamic>> deckMaps = await _apiClient.listDecks(
       token,
     );
@@ -843,7 +1189,163 @@ class AppStore extends StateNotifier<AppState> {
       );
       cardMaps.addAll(cards);
     }
-    return _RemoteSnapshot(decks: deckMaps, cards: cardMaps);
+    return _RemoteSnapshot(
+      folders: folderMaps,
+      decks: deckMaps,
+      cards: cardMaps,
+    );
+  }
+
+  Future<FolderModel?> createFolder({required String name}) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再创建文件夹');
+      return null;
+    }
+    final String trimmedName = name.trim();
+    if (trimmedName.isEmpty) {
+      state = state.copyWith(errorMessage: '请输入文件夹名称');
+      return null;
+    }
+    final bool exists = state.folders.any(
+      (FolderModel folder) =>
+          folder.name.trim().toLowerCase() == trimmedName.toLowerCase(),
+    );
+    if (exists) {
+      state = state.copyWith(errorMessage: '已存在同名文件夹，请换一个名称');
+      return null;
+    }
+
+    try {
+      final Map<String, dynamic> response = await _apiClient.createFolder(
+        token: token,
+        payload: <String, dynamic>{'name': trimmedName},
+      );
+      await _localCache.upsertFolder(response);
+      final FolderModel created = FolderModel.fromJson(response);
+      state = state.copyWith(
+        folders: <FolderModel>[...state.folders, created]
+          ..sort((FolderModel a, FolderModel b) => a.name.compareTo(b.name)),
+        clearError: true,
+      );
+      return created;
+    } on DioException catch (error) {
+      if (_isUnauthorized(error)) {
+        await _expireSession(message: '登录已过期，请重新登录后再创建文件夹');
+        return null;
+      }
+      state = state.copyWith(errorMessage: '创建文件夹失败：$error');
+      return null;
+    } catch (error) {
+      state = state.copyWith(errorMessage: '创建文件夹失败：$error');
+      return null;
+    }
+  }
+
+  Future<FolderModel?> updateFolder({
+    required String folderId,
+    required String name,
+  }) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再编辑文件夹');
+      return null;
+    }
+    final String trimmedName = name.trim();
+    if (trimmedName.isEmpty) {
+      state = state.copyWith(errorMessage: '请输入文件夹名称');
+      return null;
+    }
+    final bool exists = state.folders.any(
+      (FolderModel folder) =>
+          folder.id != folderId &&
+          folder.name.trim().toLowerCase() == trimmedName.toLowerCase(),
+    );
+    if (exists) {
+      state = state.copyWith(errorMessage: '已存在同名文件夹，请换一个名称');
+      return null;
+    }
+
+    try {
+      final Map<String, dynamic> response = await _apiClient.updateFolder(
+        token: token,
+        folderId: folderId,
+        payload: <String, dynamic>{'name': trimmedName},
+      );
+      await _localCache.upsertFolder(response);
+      final FolderModel updated = FolderModel.fromJson(response);
+      state = state.copyWith(
+        folders:
+            state.folders
+                .map((FolderModel item) => item.id == folderId ? updated : item)
+                .toList()
+              ..sort(
+                (FolderModel a, FolderModel b) => a.name.compareTo(b.name),
+              ),
+        clearError: true,
+      );
+      return updated;
+    } on DioException catch (error) {
+      if (_isUnauthorized(error)) {
+        await _expireSession(message: '登录已过期，请重新登录后再编辑文件夹');
+        return null;
+      }
+      state = state.copyWith(errorMessage: '编辑文件夹失败：$error');
+      return null;
+    } catch (error) {
+      state = state.copyWith(errorMessage: '编辑文件夹失败：$error');
+      return null;
+    }
+  }
+
+  Future<bool> deleteFolder(String folderId) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再删除文件夹');
+      return false;
+    }
+
+    final List<DeckModel> nextDecks = state.decks.map((DeckModel deck) {
+      if (deck.folderId != folderId) {
+        return deck;
+      }
+      return DeckModel(
+        id: deck.id,
+        name: deck.name,
+        description: deck.description,
+        icon: deck.icon,
+        colorHex: deck.colorHex,
+        reviewOrder: deck.reviewOrder,
+        newCardsPerDay: deck.newCardsPerDay,
+        maxReviewsPerDay: deck.maxReviewsPerDay,
+      );
+    }).toList();
+
+    try {
+      await _apiClient.deleteFolder(token: token, folderId: folderId);
+      await _localCache.deleteFolder(folderId);
+      for (final DeckModel deck in nextDecks) {
+        await _localCache.upsertDeck(deck.toJson());
+      }
+      state = state.copyWith(
+        folders: state.folders
+            .where((FolderModel folder) => folder.id != folderId)
+            .toList(),
+        decks: nextDecks,
+        clearError: true,
+      );
+      return true;
+    } on DioException catch (error) {
+      if (_isUnauthorized(error)) {
+        await _expireSession(message: '登录已过期，请重新登录后再删除文件夹');
+        return false;
+      }
+      state = state.copyWith(errorMessage: '删除文件夹失败：$error');
+      return false;
+    } catch (error) {
+      state = state.copyWith(errorMessage: '删除文件夹失败：$error');
+      return false;
+    }
   }
 
   Future<DeckModel?> createDeck({
@@ -851,6 +1353,8 @@ class AppStore extends StateNotifier<AppState> {
     required String description,
     required String icon,
     required String colorHex,
+    String? folderId,
+    DeckReviewOrder reviewOrder = DeckReviewOrder.sequential,
     int newCardsPerDay = 20,
     int maxReviewsPerDay = 200,
   }) async {
@@ -883,6 +1387,8 @@ class AppStore extends StateNotifier<AppState> {
           'description': description.trim(),
           'color': colorHex,
           'icon': icon,
+          'folder_id': folderId,
+          'review_order': reviewOrder.rawValue,
           'new_cards_per_day': newCardsPerDay,
           'max_reviews_per_day': maxReviewsPerDay,
         },
@@ -916,6 +1422,8 @@ class AppStore extends StateNotifier<AppState> {
     required String description,
     required String icon,
     required String colorHex,
+    String? folderId,
+    required DeckReviewOrder reviewOrder,
     required int newCardsPerDay,
     required int maxReviewsPerDay,
   }) async {
@@ -962,6 +1470,8 @@ class AppStore extends StateNotifier<AppState> {
           'description': description.trim(),
           'color': colorHex,
           'icon': icon,
+          'folder_id': folderId,
+          'review_order': reviewOrder.rawValue,
           'new_cards_per_day': resolvedNewCardsPerDay,
           'max_reviews_per_day': resolvedMaxReviewsPerDay,
         },
@@ -1069,6 +1579,7 @@ class AppStore extends StateNotifier<AppState> {
     required String content,
     required String note,
     required List<String> tags,
+    required bool studyEnabled,
   }) async {
     final String? token = state.accessToken;
     if (token == null || token.isEmpty) {
@@ -1084,6 +1595,7 @@ class AppStore extends StateNotifier<AppState> {
         content: content,
         note: note,
         tags: tags,
+        studyEnabled: studyEnabled,
       );
       final Map<String, dynamic> response = await _apiClient.createCard(
         token: token,
@@ -1119,6 +1631,7 @@ class AppStore extends StateNotifier<AppState> {
             content: content,
             note: note,
             tags: tags,
+            studyEnabled: studyEnabled,
           ),
         },
         occurredAt: DateTime.now(),
@@ -1133,6 +1646,7 @@ class AppStore extends StateNotifier<AppState> {
         content: content,
         tags: tags,
         note: note,
+        studyEnabled: studyEnabled,
         createdAt: DateTime.now(),
         updatedAt: DateTime.now(),
         state: FsrsState(dueDate: DateTime.now()),
@@ -1149,7 +1663,10 @@ class AppStore extends StateNotifier<AppState> {
     }
   }
 
-  Future<void> saveGeneratedCardsToDeck(String deckId) async {
+  Future<void> saveGeneratedCardsToDeck(
+    String deckId, {
+    bool studyEnabled = false,
+  }) async {
     if (state.generatedCards.isEmpty) {
       return;
     }
@@ -1160,6 +1677,7 @@ class AppStore extends StateNotifier<AppState> {
         content: item.content,
         note: item.note,
         tags: item.tags,
+        studyEnabled: studyEnabled,
       );
     }
     clearGeneratedCards();
@@ -1171,6 +1689,7 @@ class AppStore extends StateNotifier<AppState> {
     required String content,
     required String note,
     required List<String> tags,
+    required bool studyEnabled,
   }) async {
     final String? token = state.accessToken;
     if (token == null || token.isEmpty) {
@@ -1190,6 +1709,7 @@ class AppStore extends StateNotifier<AppState> {
       content: content,
       note: note,
       tags: tags,
+      studyEnabled: studyEnabled,
     );
 
     final List<SyncOperation> pendingOperations =
@@ -1210,6 +1730,7 @@ class AppStore extends StateNotifier<AppState> {
         content: content,
         tags: tags,
         note: note,
+        studyEnabled: studyEnabled,
         createdAt: existingCard.createdAt,
         updatedAt: DateTime.now(),
         state: existingCard.state,
@@ -1290,6 +1811,7 @@ class AppStore extends StateNotifier<AppState> {
           content: content,
           tags: tags,
           note: note,
+          studyEnabled: studyEnabled,
           createdAt: item.createdAt,
           updatedAt: DateTime.now(),
           state: item.state,
@@ -1406,15 +1928,37 @@ class AppStore extends StateNotifier<AppState> {
     }
   }
 
-  Future<void> submitReview({
+  Future<bool> updateCardStudyEnabled({
+    required String cardId,
+    required bool studyEnabled,
+  }) async {
+    final CardModel? existingCard = state.cards.cast<CardModel?>().firstWhere(
+      (CardModel? item) => item?.id == cardId,
+      orElse: () => null,
+    );
+    if (existingCard == null) {
+      state = state.copyWith(errorMessage: '未找到要更新的卡片');
+      return false;
+    }
+    return updateCard(
+      cardId: cardId,
+      title: existingCard.title,
+      content: existingCard.content,
+      note: existingCard.note,
+      tags: existingCard.tags,
+      studyEnabled: studyEnabled,
+    );
+  }
+
+  Future<CardModel?> submitReview({
     required String cardId,
     required ReviewRating rating,
   }) async {
-    _ensureDailyProgressFresh();
+    await _ensureDailyProgressFresh();
     final String? token = state.accessToken;
     if (token == null || token.isEmpty) {
       state = state.copyWith(errorMessage: '请先登录后再提交评分');
-      return;
+      return null;
     }
 
     final CardModel? existingCard = state.cards.cast<CardModel?>().firstWhere(
@@ -1423,7 +1967,7 @@ class AppStore extends StateNotifier<AppState> {
     );
     if (existingCard == null) {
       state = state.copyWith(errorMessage: '未找到待复习卡片');
-      return;
+      return null;
     }
 
     try {
@@ -1441,88 +1985,22 @@ class AppStore extends StateNotifier<AppState> {
       }).toList();
 
       state = state.copyWith(cards: cards, clearError: true);
-      _recordReviewProgress(existingCard);
+      await _recordReviewProgress(existingCard);
+      return updated;
     } on DioException catch (error) {
       if (_isUnauthorized(error)) {
         await _expireSession(message: '登录已过期，请重新登录后再提交评分');
-        return;
+        return null;
       }
       if (!_shouldQueueOffline(error)) {
         state = state.copyWith(errorMessage: '提交评分失败：$error');
-        return;
+        return null;
       }
-
-      final DateTime now = DateTime.now();
-      final FsrsState nextState = _fsrsScheduler.review(
-        current: existingCard.state,
-        rating: rating,
-        now: now,
-      );
-      final CardModel updatedLocalCard = CardModel(
-        id: existingCard.id,
-        clientId: existingCard.clientId,
-        deckId: existingCard.deckId,
-        title: existingCard.title,
-        content: existingCard.content,
-        tags: existingCard.tags,
-        note: existingCard.note,
-        createdAt: existingCard.createdAt,
-        updatedAt: now,
-        state: nextState,
-      );
-
-      final List<SyncOperation> operations = await _loadPendingOperations();
-      final SyncOperation? pendingCreate = _findPendingCreateOperation(
-        operations: operations,
-        clientId: existingCard.clientId,
-      );
-
-      if (pendingCreate != null) {
-        final List<SyncOperation> nextOperations = operations.map((
-          SyncOperation item,
-        ) {
-          if (item.id != pendingCreate.id) {
-            return item;
-          }
-          return SyncOperation(
-            id: item.id,
-            type: item.type,
-            occurredAt: item.occurredAt,
-            payload: <String, dynamic>{
-              ...item.payload,
-              'state': _fsrsStateToJson(nextState),
-            },
-          );
-        }).toList();
-        await _replacePendingOperations(nextOperations);
-        await _localCache.upsertCard(updatedLocalCard.toJson());
-        state = state.copyWith(
-          cards: state.cards.map((CardModel card) {
-            return card.id == updatedLocalCard.id ? updatedLocalCard : card;
-          }).toList(),
-          errorMessage: '复习结果已离线保存，待建卡同步时会带上本地进度',
-        );
-        _recordReviewProgress(existingCard);
-        return;
-      }
-
-      final SyncOperation operation = SyncOperation(
-        id: _uuid.v4(),
-        type: 'submit_review',
-        payload: <String, dynamic>{'card_id': cardId, 'rating': rating.score},
-        occurredAt: now,
-      );
-      await _queueOperation(operation);
-      await _localCache.upsertCard(updatedLocalCard.toJson());
-      state = state.copyWith(
-        cards: state.cards.map((CardModel card) {
-          return card.id == updatedLocalCard.id ? updatedLocalCard : card;
-        }).toList(),
-        errorMessage: '复习结果已离线保存，稍后将自动同步',
-      );
-      _recordReviewProgress(existingCard);
+      state = state.copyWith(errorMessage: '提交评分需要联网，请检查网络后重试');
+      return null;
     } catch (error) {
       state = state.copyWith(errorMessage: '提交评分失败：$error');
+      return null;
     }
   }
 
@@ -1621,8 +2099,104 @@ class AppStore extends StateNotifier<AppState> {
     }
   }
 
+  Future<void> generateCardsFromFile({
+    required String filename,
+    required Uint8List bytes,
+    required String topic,
+    required int cardCount,
+    required String difficulty,
+    List<String> cardTypes = const <String>[
+      'basic',
+      'single_choice',
+      'multi_choice',
+      'cloze',
+    ],
+  }) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再使用 AI 生成功能');
+      return;
+    }
+
+    state = state.copyWith(syncInProgress: true, clearError: true);
+    try {
+      final Map<String, dynamic> response = await _apiClient
+          .generateCardsFromFile(
+            token: token,
+            filename: filename,
+            bytes: bytes,
+            topic: topic,
+            cardCount: cardCount,
+            difficulty: difficulty,
+            cardTypes: cardTypes,
+          );
+      final List<Map<String, dynamic>> items = _coerceMapList(
+        response['items'],
+      );
+      final Map<String, dynamic> document = _coerceMap(response['document']);
+      state = state.copyWith(
+        syncInProgress: false,
+        generatedDocument: AIDocumentSummary.fromJson(document),
+        generatedCards: items.map(AIGeneratedCard.fromJson).toList(),
+      );
+    } catch (error) {
+      state = state.copyWith(
+        syncInProgress: false,
+        errorMessage: 'AI 文件生成失败：$error',
+      );
+    }
+  }
+
+  Future<List<AIRewriteCandidate>> rewriteCardWithAI({
+    required String title,
+    required String content,
+    required String rewriteType,
+    required String instruction,
+    String? cardId,
+  }) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再使用 AI 优化功能');
+      return <AIRewriteCandidate>[];
+    }
+
+    state = state.copyWith(
+      syncInProgress: true,
+      rewriteCandidates: <AIRewriteCandidate>[],
+      clearError: true,
+    );
+    try {
+      final List<Map<String, dynamic>> items = await _apiClient
+          .rewriteCardWithAI(
+            token: token,
+            cardId: cardId,
+            title: title,
+            content: content,
+            rewriteType: rewriteType,
+            instruction: instruction,
+          );
+      final List<AIRewriteCandidate> candidates = items
+          .map(AIRewriteCandidate.fromJson)
+          .toList();
+      state = state.copyWith(
+        syncInProgress: false,
+        rewriteCandidates: candidates,
+      );
+      return candidates;
+    } catch (error) {
+      state = state.copyWith(
+        syncInProgress: false,
+        errorMessage: 'AI 优化失败：$error',
+      );
+      return <AIRewriteCandidate>[];
+    }
+  }
+
   void clearGeneratedCards() {
-    state = state.copyWith(generatedCards: <AIGeneratedCard>[]);
+    state = state.copyWith(
+      generatedCards: <AIGeneratedCard>[],
+      clearGeneratedDocument: true,
+    );
   }
 
   Future<void> _saveSessionFromResponse(Map<String, dynamic> response) async {
@@ -1717,6 +2291,31 @@ class AppStore extends StateNotifier<AppState> {
     return error.response?.statusCode == 401;
   }
 
+  String _friendlyAuthError(DioException error, {required String action}) {
+    final int? status = error.response?.statusCode;
+    final dynamic data = error.response?.data;
+    final String serverMessage = data is Map
+        ? (data['error'] ?? '').toString()
+        : '';
+    if (status == 401) {
+      return '$action失败：邮箱或密码不正确。如果刚重启过开发后端，请先重新注册账号。';
+    }
+    if (status == 400 && serverMessage.isNotEmpty) {
+      if (serverMessage.contains('already') ||
+          serverMessage.contains('duplicate')) {
+        return '$action失败：这个邮箱已经注册，请直接登录。';
+      }
+      return '$action失败：$serverMessage';
+    }
+    if (error.type == DioExceptionType.connectionError ||
+        error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.receiveTimeout ||
+        error.type == DioExceptionType.sendTimeout) {
+      return '$action失败：无法连接服务端，请确认本地后端已启动。';
+    }
+    return '$action失败，请稍后重试';
+  }
+
   bool _shouldQueueOffline(DioException error) {
     if (_isUnauthorized(error)) {
       return false;
@@ -1737,21 +2336,6 @@ class AppStore extends StateNotifier<AppState> {
       case DioExceptionType.cancel:
         return false;
     }
-  }
-
-  Map<String, dynamic> _fsrsStateToJson(FsrsState state) {
-    return <String, dynamic>{
-      'state': state.state,
-      'difficulty': state.difficulty,
-      'stability': state.stability,
-      'retrievability': state.retrievability,
-      'due_date': state.dueDate.toIso8601String(),
-      'last_review_at': state.lastReviewAt?.toIso8601String(),
-      'reps': state.reps,
-      'lapses': state.lapses,
-      'elapsed_days': state.elapsedDays,
-      'scheduled_days': state.scheduledDays,
-    };
   }
 
   Future<void> _expireSession({required String message}) async {
@@ -1782,9 +2366,36 @@ List<Map<String, dynamic>> _coerceMapList(dynamic value) {
       .toList();
 }
 
-class _RemoteSnapshot {
-  const _RemoteSnapshot({required this.decks, required this.cards});
+int _coerceInt(dynamic value) {
+  if (value is num) {
+    return value.toInt();
+  }
+  return int.tryParse(value?.toString() ?? '') ?? 0;
+}
 
+Map<String, int> _coerceIntMap(dynamic value) {
+  if (value is! Map) {
+    return <String, int>{};
+  }
+  final Map<String, int> result = <String, int>{};
+  value.forEach((dynamic key, dynamic rawValue) {
+    final String normalizedKey = key?.toString() ?? '';
+    if (normalizedKey.isEmpty) {
+      return;
+    }
+    result[normalizedKey] = _coerceInt(rawValue);
+  });
+  return result;
+}
+
+class _RemoteSnapshot {
+  const _RemoteSnapshot({
+    required this.folders,
+    required this.decks,
+    required this.cards,
+  });
+
+  final List<Map<String, dynamic>> folders;
   final List<Map<String, dynamic>> decks;
   final List<Map<String, dynamic>> cards;
 }

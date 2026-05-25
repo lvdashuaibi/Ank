@@ -1,17 +1,22 @@
-# flashcard_app
+# Ank Flutter Client
 
-A new Flutter project.
+Flutter 客户端用于牌组管理、卡片编辑、Card DSL 导入和联网复习。
 
-## Getting Started
+## Notes
 
-This project is a starting point for a Flutter application.
+- 复习评分必须联网提交，由服务端官方 FSRS 引擎计算下一次到期时间。
+- 本地缓存用于启动加速和弱网查看。
+- 内容编辑仍可进入待同步队列；复习排期不在客户端离线计算。
 
-A few resources to get you started if this is your first Flutter project:
+## Development
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+flutter test -r compact
+flutter analyze
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Run with the repository root startup script when you need the backend:
+
+```bash
+bash ../scripts/start_local.sh
+```
