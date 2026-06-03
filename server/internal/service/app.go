@@ -551,7 +551,7 @@ func (s *AppService) CreateAIGenerationJob(userID string, request model.AIGenera
 		SourceName: request.SourceName,
 		SourceType: "text",
 		Status:     "running",
-		Progress:   0,
+		Progress:   0.05,
 		Request:    request,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -559,15 +559,65 @@ func (s *AppService) CreateAIGenerationJob(userID string, request model.AIGenera
 	if err := s.store.CreateAIGenerationJob(job); err != nil {
 		return model.AIGenerationJob{}, err
 	}
-	result := s.GenerateCards(request)
+	go s.runAIGenerationJob(job, func() model.AIGenerateResponse {
+		return s.GenerateCards(request)
+	})
+	return job, nil
+}
+
+func (s *AppService) CreateAIGenerationJobFromUpload(userID string, request model.AIGenerateRequest, header *multipart.FileHeader) (model.AIGenerationJob, error) {
+	doc, err := extractDocumentFromUpload(header)
+	if err != nil {
+		return model.AIGenerationJob{}, err
+	}
+	now := time.Now()
+	if strings.TrimSpace(request.Topic) == "" {
+		request.Topic = strings.TrimSuffix(doc.Title, filepath.Ext(doc.Title))
+	}
+	request.SourceName = doc.Title
+	job := model.AIGenerationJob{
+		ID:         repository.NewID(),
+		UserID:     userID,
+		SourceName: doc.Title,
+		SourceType: doc.MimeType,
+		Status:     "running",
+		Progress:   0.05,
+		Request:    request,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := s.store.CreateAIGenerationJob(job); err != nil {
+		return model.AIGenerationJob{}, err
+	}
+	go s.runAIGenerationJob(job, func() model.AIGenerateResponse {
+		return s.GenerateCardsFromDocument(request, doc)
+	})
+	return job, nil
+}
+
+func (s *AppService) runAIGenerationJob(job model.AIGenerationJob, generate func() model.AIGenerateResponse) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			job.Status = "failed"
+			job.Progress = 1
+			job.ErrorMessage = fmt.Sprintf("AI generation failed: %v", recovered)
+			job.UpdatedAt = time.Now()
+			_ = s.store.UpdateAIGenerationJob(job)
+		}
+	}()
+	job.Progress = 0.2
+	job.UpdatedAt = time.Now()
+	_ = s.store.UpdateAIGenerationJob(job)
+	result := generate()
 	job.Status = "succeeded"
 	job.Progress = 1
 	job.Result = &result
 	job.UpdatedAt = time.Now()
-	if err := s.store.UpdateAIGenerationJob(job); err != nil {
-		return model.AIGenerationJob{}, err
-	}
-	return job, nil
+	_ = s.store.UpdateAIGenerationJob(job)
+}
+
+func (s *AppService) ListAIGenerationJobs(userID string) []model.AIGenerationJob {
+	return s.store.ListAIGenerationJobs(userID)
 }
 
 func (s *AppService) GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error) {
@@ -823,10 +873,8 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 		difficulty = "normal"
 	}
 
-	cardCount := request.CardCount
-	if cardCount <= 0 {
-		cardCount = 3
-	}
+	facts := extractAtomicFacts(context, topic)
+	cardCount := effectiveAICardCount(request, facts, policy)
 	if cardCount > policy.MaxCardsTotal {
 		cardCount = policy.MaxCardsTotal
 	}
@@ -834,7 +882,6 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 		cardCount = 8
 	}
 
-	facts := extractAtomicFacts(context, topic)
 	templates := []struct {
 		front string
 		back  string
@@ -917,6 +964,26 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 	items = repairGeneratedCardsForPolicy(items, policy)
 	items = attachQualityReports(items, policy)
 	return model.AIGenerateResponse{Items: items, Policy: &policy}
+}
+
+func effectiveAICardCount(request model.AIGenerateRequest, facts []string, policy model.GenerationPolicy) int {
+	if request.CardCount > 0 {
+		return request.CardCount
+	}
+	count := len(facts)
+	if count == 0 {
+		count = 4
+	}
+	if count < 3 {
+		count = 3
+	}
+	if policy.MaxCardsTotal > 0 && count > policy.MaxCardsTotal {
+		count = policy.MaxCardsTotal
+	}
+	if !request.BatchMode && count > 8 {
+		count = 8
+	}
+	return count
 }
 
 func extractAtomicFacts(context string, topic string) []string {
@@ -1245,6 +1312,68 @@ func (s *AppService) ChatCardsWithAI(request model.AICardChatRequest) model.AICa
 		instruction = "请根据我的需求继续设计或微调卡片。"
 	}
 	items := append([]model.AIGeneratedCard(nil), request.Items...)
+	selected := selectedGeneratedCardIndexes(request.SelectedIndexes, len(items))
+	operation := strings.ToLower(strings.TrimSpace(request.Operation))
+	if operation == "" && len(selected) == 1 {
+		operation = "refine"
+	}
+	if len(selected) > 0 {
+		policy := effectiveGenerationPolicy(model.AIGenerateRequest{Policy: request.Policy})
+		switch operation {
+		case "split":
+			index := selected[0]
+			splitItems := s.splitGeneratedCard(items[index], request.Topic, instruction)
+			next := make([]model.AIGeneratedCard, 0, len(items)+len(splitItems)-1)
+			next = append(next, items[:index]...)
+			next = append(next, splitItems...)
+			next = append(next, items[index+1:]...)
+			return model.AICardChatResponse{
+				AssistantMessage: fmt.Sprintf("已把第 %d 张草稿拆成 %d 张更小的原子卡。", index+1, len(splitItems)),
+				Items:            attachQualityReports(next, policy),
+				UpdatedIndex:     &index,
+			}
+		case "merge":
+			if len(selected) >= 2 {
+				merged := mergeGeneratedCards(items, selected, request.Topic, instruction)
+				selectedSet := intSet(selected)
+				next := make([]model.AIGeneratedCard, 0, len(items)-len(selected)+1)
+				inserted := false
+				for index, item := range items {
+					if _, ok := selectedSet[index]; !ok {
+						next = append(next, item)
+						continue
+					}
+					if !inserted {
+						next = append(next, merged)
+						inserted = true
+					}
+				}
+				first := selected[0]
+				return model.AICardChatResponse{
+					AssistantMessage: fmt.Sprintf("已把选中的 %d 张草稿合并成 1 张对比卡。", len(selected)),
+					Items:            attachQualityReports(next, policy),
+					UpdatedIndex:     &first,
+				}
+			}
+		case "refine":
+			index := selected[0]
+			item := items[index]
+			rewrite := s.RewriteCardWithAI(model.AIRewriteCardRequest{
+				Title:       item.Title,
+				Content:     item.Content,
+				RewriteType: "chat_refine",
+				Instruction: instruction,
+			})
+			if len(rewrite.Candidates) > 0 {
+				items[index] = generatedCardFromRewriteCandidate(item, rewrite.Candidates[0])
+			}
+			return model.AICardChatResponse{
+				AssistantMessage: fmt.Sprintf("已根据你的要求微调第 %d 张卡片。", index+1),
+				Items:            attachQualityReports(items, policy),
+				UpdatedIndex:     &index,
+			}
+		}
+	}
 	if request.Reference != nil && request.Reference.CardIndex >= 0 && request.Reference.CardIndex < len(items) {
 		index := request.Reference.CardIndex
 		item := items[index]
@@ -1257,17 +1386,7 @@ func (s *AppService) ChatCardsWithAI(request model.AICardChatRequest) model.AICa
 		})
 		if len(rewrite.Candidates) > 0 {
 			candidate := rewrite.Candidates[0]
-			items[index] = model.AIGeneratedCard{
-				Title:          firstNonEmpty(candidate.Title, item.Title),
-				Content:        firstNonEmpty(candidate.Content, item.Content),
-				Tags:           item.Tags,
-				Note:           item.Note,
-				CardType:       item.CardType,
-				KnowledgePoint: item.KnowledgePoint,
-				SourceExcerpt:  item.SourceExcerpt,
-				SourceLocation: item.SourceLocation,
-				Difficulty:     item.Difficulty,
-			}
+			items[index] = generatedCardFromRewriteCandidate(item, candidate)
 		}
 		policy := effectiveGenerationPolicy(model.AIGenerateRequest{Policy: request.Policy})
 		return model.AICardChatResponse{
@@ -1289,9 +1408,108 @@ func (s *AppService) ChatCardsWithAI(request model.AICardChatRequest) model.AICa
 		Policy:     request.Policy,
 	})
 	return model.AICardChatResponse{
-		AssistantMessage: fmt.Sprintf("我根据这轮需求生成了 %d 张草稿，已放到右侧预览区。你可以继续引用其中任意一张让我微调。", len(generated.Items)),
+		AssistantMessage: fmt.Sprintf("我根据这轮需求生成了 %d 张草稿，已放到预览区。你可以点进单张卡片继续微调。", len(generated.Items)),
 		Items:            generated.Items,
 	}
+}
+
+func selectedGeneratedCardIndexes(values []int, itemCount int) []int {
+	if itemCount <= 0 {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if value < 0 || value >= itemCount {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func (s *AppService) splitGeneratedCard(item model.AIGeneratedCard, topic string, instruction string) []model.AIGeneratedCard {
+	rewrite := s.RewriteCardWithAI(model.AIRewriteCardRequest{
+		Title:       item.Title,
+		Content:     item.Content,
+		RewriteType: "split",
+		Instruction: instruction,
+	})
+	if len(rewrite.Candidates) > 1 {
+		cards := make([]model.AIGeneratedCard, 0, len(rewrite.Candidates))
+		for _, candidate := range rewrite.Candidates {
+			cards = append(cards, generatedCardFromRewriteCandidate(item, candidate))
+		}
+		return cards
+	}
+	prompt, answer := splitCardContent(item.Content)
+	parts := splitAnswerIntoAtomicParts(answer)
+	if len(parts) <= 1 {
+		parts = []string{answer}
+	}
+	cards := make([]model.AIGeneratedCard, 0, len(parts))
+	for index, part := range parts {
+		partTitle := firstNonEmpty(firstLine(part), fmt.Sprintf("%s要点%d", firstNonEmpty(topic, item.Title), index+1))
+		partPrompt := fmt.Sprintf("%s：%s", strings.TrimSuffix(firstNonEmpty(item.Title, prompt), "？"), partTitle)
+		next := item
+		next.Title = partTitle
+		next.Content = composeCardContent(partPrompt, part)
+		next.Front, next.Back = splitCardContent(next.Content)
+		cards = append(cards, next)
+	}
+	return cards
+}
+
+func mergeGeneratedCards(items []model.AIGeneratedCard, selected []int, topic string, instruction string) model.AIGeneratedCard {
+	titleParts := make([]string, 0, len(selected))
+	answerParts := make([]string, 0, len(selected))
+	tags := make([]string, 0)
+	for _, index := range selected {
+		item := items[index]
+		prompt, answer := splitCardContent(item.Content)
+		title := firstNonEmpty(item.Title, firstLine(prompt))
+		titleParts = append(titleParts, title)
+		answerParts = append(answerParts, fmt.Sprintf("%s：%s", title, firstNonEmpty(answer, prompt)))
+		tags = append(tags, item.Tags...)
+	}
+	baseTopic := firstNonEmpty(strings.TrimSpace(topic), strings.Join(titleParts, " / "))
+	prompt := fmt.Sprintf("%s中，%s之间的关系或区别是什么？", baseTopic, strings.Join(titleParts, "、"))
+	answer := strings.Join(answerParts, "\n")
+	if strings.TrimSpace(instruction) != "" {
+		answer = answer + "\n微调要求：" + strings.TrimSpace(instruction)
+	}
+	content := composeCardContent(prompt, answer)
+	return model.AIGeneratedCard{
+		Title:          firstLine(prompt),
+		Content:        content,
+		Front:          prompt,
+		Back:           answer,
+		CardType:       "basic",
+		KnowledgePoint: baseTopic,
+		Tags:           compactStrings(append([]string{"AI生成", "合并卡"}, tags...)),
+		Note:           "由多张 AI 草稿合并，可继续对话微调。",
+	}
+}
+
+func generatedCardFromRewriteCandidate(original model.AIGeneratedCard, candidate model.AIRewriteCandidate) model.AIGeneratedCard {
+	next := original
+	next.Title = firstNonEmpty(candidate.Title, original.Title)
+	next.Content = firstNonEmpty(candidate.Content, original.Content)
+	next.Front, next.Back = splitCardContent(next.Content)
+	return next
+}
+
+func intSet(values []int) map[int]struct{} {
+	out := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
 }
 
 func referencedCardText(item model.AIGeneratedCard, ref model.AICardReference) string {

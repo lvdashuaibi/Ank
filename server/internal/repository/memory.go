@@ -340,6 +340,21 @@ func (s *MemoryStore) CreateAIGenerationJob(job model.AIGenerationJob) error {
 	return nil
 }
 
+func (s *MemoryStore) ListAIGenerationJobs(userID string) []model.AIGenerationJob {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	jobs := make([]model.AIGenerationJob, 0)
+	for _, job := range s.aiJobs {
+		if job.UserID == userID {
+			jobs = append(jobs, job)
+		}
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
+	})
+	return jobs
+}
+
 func (s *MemoryStore) GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

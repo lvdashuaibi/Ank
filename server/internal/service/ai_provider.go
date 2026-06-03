@@ -113,11 +113,12 @@ func (s *AppService) createAIChatCompletion(payload openAIChatRequest) (openAICh
 }
 
 func buildAIPrompt(request model.AIGenerateRequest) string {
-	cardCount := request.CardCount
-	if cardCount <= 0 {
-		cardCount = 3
-	}
 	policy := effectiveGenerationPolicy(request)
+	facts := extractAtomicFacts(request.Context, request.Topic)
+	cardCountLine := fmt.Sprintf("CardCount: %d", effectiveAICardCount(request, facts, policy))
+	if request.CardCount <= 0 {
+		cardCountLine = fmt.Sprintf("CardCount: auto\nTargetCardRange: 3-%d\nInstruction: Choose the appropriate number of atomic cards based on source granularity; do not pad with duplicates.", effectiveAICardCount(request, facts, policy))
+	}
 	cardTypes := strings.Join(policy.PreferredCardTypes, ", ")
 	if strings.TrimSpace(cardTypes) == "" {
 		cardTypes = "basic, single_choice, multi_choice, cloze"
@@ -127,12 +128,12 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 		strategy = "fsrs_friendly"
 	}
 	return fmt.Sprintf(
-		"Topic: %s\nSourceName: %s\nContext: %s\nDifficulty: %s\nCardCount: %d\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\n%s\n%s",
+		"Topic: %s\nSourceName: %s\nContext: %s\nDifficulty: %s\n%s\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\n%s\n%s",
 		strings.TrimSpace(request.Topic),
 		strings.TrimSpace(request.SourceName),
 		strings.TrimSpace(request.Context),
 		strings.TrimSpace(request.Difficulty),
-		cardCount,
+		cardCountLine,
 		cardTypes,
 		strategy,
 		policyPromptRules(policy),

@@ -462,6 +462,26 @@ func (s *PostgresStore) CreateAIGenerationJob(job model.AIGenerationJob) error {
 	return err
 }
 
+func (s *PostgresStore) ListAIGenerationJobs(userID string) []model.AIGenerationJob {
+	rows, err := s.db.Query(
+		`SELECT id, user_id, source_name, source_type, status, progress, error_message, request_json, result_json, created_at, updated_at
+		 FROM ai_generation_jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+		userID,
+	)
+	if err != nil {
+		return []model.AIGenerationJob{}
+	}
+	defer rows.Close()
+
+	jobs := make([]model.AIGenerationJob, 0)
+	for rows.Next() {
+		if job, err := scanAIGenerationJob(rows); err == nil {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs
+}
+
 func (s *PostgresStore) GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error) {
 	row := s.db.QueryRow(
 		`SELECT id, user_id, source_name, source_type, status, progress, error_message, request_json, result_json, created_at, updated_at

@@ -1039,6 +1039,86 @@ func TestChatCardsWithAIRefinesReferencedCardOnly(t *testing.T) {
 	}
 }
 
+func TestGenerateCardsChoosesCardCountWhenUnspecified(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:      "教育学原理",
+		Context:    "教育目的规定人才培养方向。教育制度规范教育活动运行。课程目标连接教学内容与评价。形成性评价支持及时反馈。德育过程强调知情意行统一。",
+		CardCount:  0,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			MaxCardsTotal:      12,
+			MaxCardsPerChunk:   6,
+			PreferredCardTypes: []string{"basic"},
+		},
+	})
+
+	if got := len(response.Items); got < 5 {
+		t.Fatalf("expected unspecified count to follow source granularity, got %d", got)
+	}
+}
+
+func TestChatCardsWithAISplitsSelectedCard(t *testing.T) {
+	service := newTestAppService(t)
+	items := []model.AIGeneratedCard{
+		{
+			Title:    "教育目的与教育制度",
+			Content:  composeCardContent("教育目的和教育制度分别是什么？", "教育目的规定人才培养方向；教育制度规范教育活动运行；课程目标连接教学内容与评价。"),
+			CardType: "basic",
+			Tags:     []string{"AI生成"},
+		},
+	}
+
+	response := service.ChatCardsWithAI(model.AICardChatRequest{
+		Topic:           "教育学原理",
+		Instruction:     "拆成更小的原子卡",
+		Operation:       "split",
+		Items:           items,
+		SelectedIndexes: []int{0},
+	})
+
+	if len(response.Items) < 2 {
+		t.Fatalf("expected split to create multiple cards, got %+v", response.Items)
+	}
+	if response.UpdatedIndex == nil || *response.UpdatedIndex != 0 {
+		t.Fatalf("expected split to report first selected index, got %+v", response.UpdatedIndex)
+	}
+}
+
+func TestChatCardsWithAIMergesSelectedCards(t *testing.T) {
+	service := newTestAppService(t)
+	items := []model.AIGeneratedCard{
+		{
+			Title:    "教育目的",
+			Content:  composeCardContent("教育目的是什么？", "规定人才培养方向。"),
+			CardType: "basic",
+			Tags:     []string{"AI生成"},
+		},
+		{
+			Title:    "教育制度",
+			Content:  composeCardContent("教育制度是什么？", "规范教育活动运行。"),
+			CardType: "basic",
+			Tags:     []string{"AI生成"},
+		},
+	}
+
+	response := service.ChatCardsWithAI(model.AICardChatRequest{
+		Topic:           "教育学原理",
+		Instruction:     "合并成一张对比卡",
+		Operation:       "merge",
+		Items:           items,
+		SelectedIndexes: []int{0, 1},
+	})
+
+	if len(response.Items) != 1 {
+		t.Fatalf("expected merge to replace selected cards with one card, got %d", len(response.Items))
+	}
+	if !strings.Contains(response.Items[0].Content, "教育目的") || !strings.Contains(response.Items[0].Content, "教育制度") {
+		t.Fatalf("expected merged content to mention both cards, got %q", response.Items[0].Content)
+	}
+}
+
 func TestCreateAIGenerationJobPersistsSucceededResult(t *testing.T) {
 	service := newTestAppService(t)
 	user := registerTestUser(t, service, "ai-job@example.com")
@@ -1052,18 +1132,40 @@ func TestCreateAIGenerationJobPersistsSucceededResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create generation job: %v", err)
 	}
-	if job.ID == "" || job.Status != "succeeded" || job.Progress != 1 {
+	if job.ID == "" || job.Status != "running" || job.Progress <= 0 {
 		t.Fatalf("unexpected job state: %+v", job)
 	}
-	if job.Result == nil || len(job.Result.Items) == 0 {
-		t.Fatalf("expected generated result on job, got %+v", job)
-	}
 
-	persisted, err := service.GetAIGenerationJob(user.ID, job.ID)
-	if err != nil {
-		t.Fatalf("get generation job: %v", err)
+	persisted := waitForAIGenerationJob(t, service, user.ID, job.ID)
+	if persisted.Status != "succeeded" || persisted.Progress != 1 {
+		t.Fatalf("expected completed job, got %+v", persisted)
 	}
 	if persisted.Result == nil || len(persisted.Result.Items) == 0 {
 		t.Fatalf("expected persisted result, got %+v", persisted)
+	}
+	if jobs := service.ListAIGenerationJobs(user.ID); len(jobs) == 0 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job to be recoverable from list, got %+v", jobs)
+	}
+}
+
+func waitForAIGenerationJob(t *testing.T, service *AppService, userID, jobID string) model.AIGenerationJob {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			job, _ := service.GetAIGenerationJob(userID, jobID)
+			t.Fatalf("generation job did not complete: %+v", job)
+		case <-ticker.C:
+			job, err := service.GetAIGenerationJob(userID, jobID)
+			if err != nil {
+				t.Fatalf("get generation job: %v", err)
+			}
+			if job.Status == "succeeded" || job.Status == "failed" {
+				return job
+			}
+		}
 	}
 }

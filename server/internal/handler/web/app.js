@@ -4,6 +4,7 @@ const state = {
   user: JSON.parse(localStorage.getItem("ank_user") || "null"),
   decks: [],
   cards: [],
+  aiJobs: [],
   selectedDeckId: localStorage.getItem("ank_deck_id") || "",
 };
 
@@ -141,6 +142,29 @@ function renderDrafts(drafts) {
   }
 }
 
+function renderJobs() {
+  const root = $("aiJobs");
+  root.innerHTML = "";
+  if (!state.aiJobs || state.aiJobs.length === 0) return;
+  for (const job of state.aiJobs.slice(0, 5)) {
+    const item = document.createElement("article");
+    item.className = "job-item";
+    const count = job.result?.items?.length || 0;
+    item.innerHTML = `
+      <div>
+        <strong>${escapeHtml(job.source_name || "后台生成任务")}</strong>
+        <p class="muted">${escapeHtml(job.status === "succeeded" ? `${count} 张草稿可取回` : job.status === "failed" ? (job.error_message || "生成失败") : `生成中 ${Math.round((job.progress || 0) * 100)}%`)}</p>
+      </div>
+      <button ${count ? "" : "disabled"} data-id="${escapeHtml(job.id)}">取回</button>
+    `;
+    item.querySelector("button").onclick = () => {
+      renderDrafts(job.result?.items || []);
+      toast(`已取回 ${count} 张草稿`);
+    };
+    root.appendChild(item);
+  }
+}
+
 async function loadDecks() {
   const body = await api("/decks");
   state.decks = body.items || [];
@@ -150,6 +174,14 @@ async function loadDecks() {
   localStorage.setItem("ank_deck_id", state.selectedDeckId);
   renderDecks();
   await loadCards();
+  await loadJobs();
+}
+
+async function loadJobs() {
+  if (!state.token) return;
+  const body = await api("/ai/generate-jobs");
+  state.aiJobs = body.items || [];
+  renderJobs();
 }
 
 async function loadCards() {
@@ -297,7 +329,7 @@ $("aiForm").addEventListener("submit", async (event) => {
       body: JSON.stringify({
         topic: $("aiTopicInput").value.trim() || $("deckTitle").textContent,
         context: $("aiContextInput").value.trim(),
-        card_count: Number($("aiCountInput").value || 4),
+        ...(Number($("aiCountInput").value || 0) > 0 ? { card_count: Number($("aiCountInput").value) } : {}),
         difficulty: "medium",
         policy: {
           atomicity_level: "strict",
@@ -315,6 +347,34 @@ $("aiForm").addEventListener("submit", async (event) => {
     setBusy(form, false);
   }
 });
+
+$("aiJobButton").onclick = async () => {
+  const form = $("aiForm");
+  setBusy(form, true);
+  try {
+    await api("/ai/generate-jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        topic: $("aiTopicInput").value.trim() || $("deckTitle").textContent,
+        context: $("aiContextInput").value.trim(),
+        ...(Number($("aiCountInput").value || 0) > 0 ? { card_count: Number($("aiCountInput").value) } : {}),
+        difficulty: "medium",
+        policy: {
+          atomicity_level: "strict",
+          answer_style: "one_sentence",
+          max_answer_chars: 100,
+          rules: "优先生成符合 DSL 的选择题或原子问答卡，题干聚焦单一知识点。",
+        },
+      }),
+    });
+    await loadJobs();
+    toast("已转入后台生成");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setBusy(form, false);
+  }
+};
 
 $("refreshButton").onclick = () => loadDecks().catch((error) => toast(error.message));
 $("logoutButton").onclick = clearSession;

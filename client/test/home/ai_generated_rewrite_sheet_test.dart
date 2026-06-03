@@ -92,24 +92,28 @@ class _RewriteSheetTestStore extends AppStore {
     required int cardCount,
     required String difficulty,
     required List<Map<String, String>> messages,
+    String? operation,
+    List<int> selectedIndexes = const <int>[],
     Map<String, dynamic>? reference,
     GenerationPolicy? policy,
   }) async {
+    final bool singleCardRefine =
+        operation == 'refine' && selectedIndexes.isNotEmpty;
     final List<AIGeneratedCard> cards = <AIGeneratedCard>[
       AIGeneratedCard(
-        title: reference == null ? '形成性评估的作用是什么？' : '微调后的形成性评估',
-        content: reference == null
-            ? '形成性评估的作用是什么？\n\n@answer\n支持及时反馈。\n@end'
-            : '形成性评估的作用是什么？\n\n@answer\n可以这样记：它帮助学生及时修正学习。\n@end',
+        title: singleCardRefine ? '微调后的形成性评估' : '形成性评估的作用是什么？',
+        content: singleCardRefine
+            ? '形成性评估的作用是什么？\n\n@answer\n可以这样记：它帮助学生及时修正学习。\n@end'
+            : '形成性评估的作用是什么？\n\n@answer\n支持及时反馈。\n@end',
         cardType: 'basic',
         tags: const <String>['AI生成'],
         note: '',
       ),
     ];
     final AICardChatResponse response = AICardChatResponse(
-      assistantMessage: reference == null ? '已生成 1 张草稿。' : '已按引用微调。',
+      assistantMessage: singleCardRefine ? '已按单卡要求微调。' : '已生成 1 张草稿。',
       items: cards,
-      updatedIndex: reference == null ? null : 0,
+      updatedIndex: singleCardRefine ? selectedIndexes.first : null,
     );
     state = state.copyWith(generatedCards: cards, clearError: true);
     return response;
@@ -122,7 +126,7 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  testWidgets('generated draft rewrite candidates render on phone width', (
+  testWidgets('generated draft can be refined through single-card chat', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(393, 852);
@@ -149,12 +153,16 @@ void main() {
     await tester.ensureVisible(find.text('微调').first);
     await tester.tap(find.text('微调').first);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('生成微调候选'));
+    await tester.enterText(
+      find.widgetWithText(TextField, '告诉 AI 如何改这张卡'),
+      '答案更口语',
+    );
+    await tester.tap(find.byTooltip('发送').last);
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('候选版本'), findsOneWidget);
-    expect(find.text('应用'), findsOneWidget);
+    expect(find.text('已按单卡要求微调。'), findsOneWidget);
+    expect(find.text('微调后的形成性评估'), findsAtLeastNWidgets(1));
   });
 
   testWidgets('AI file import mode renders picker on phone width', (
@@ -220,7 +228,8 @@ void main() {
 
       expect(find.text('已生成 1 张草稿。'), findsOneWidget);
       expect(find.text('形成性评估的作用是什么？'), findsAtLeastNWidgets(1));
-      expect(find.text('引用第 1 张'), findsOneWidget);
+      expect(find.text('引用第 1 张'), findsNothing);
+      expect(find.text('微调'), findsOneWidget);
     },
   );
 }

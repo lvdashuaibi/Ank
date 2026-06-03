@@ -81,9 +81,13 @@
             <form id="aiForm" class="editor-grid">
               <label>主题<input id="aiTopicInput" placeholder="教育学原理：形成性评估" /></label>
               <label>材料 / 要求<textarea id="aiContextInput" rows="5" placeholder="粘贴知识点、教材片段，或直接描述制卡需求。"></textarea></label>
-              <label>数量<input id="aiCountInput" type="number" min="1" max="20" value="4" /></label>
-              <button type="submit">生成 AI 草稿</button>
+              <label>数量（可选）<input id="aiCountInput" type="number" min="1" max="20" placeholder="留空由 AI 自动拆分" /></label>
+              <div class="actions">
+                <button type="submit">生成 AI 草稿</button>
+                <button id="aiJobButton" type="button" class="ghost">后台生成</button>
+              </div>
             </form>
+            <div id="aiJobs" class="jobs"></div>
             <div id="aiDrafts" class="drafts"></div>
           </section>
 

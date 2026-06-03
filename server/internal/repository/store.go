@@ -34,6 +34,7 @@ type Store interface {
 	UpdateGenerationPolicy(policy model.GenerationPolicy) error
 	DeleteGenerationPolicy(userID, policyID string) error
 	CreateAIGenerationJob(job model.AIGenerationJob) error
+	ListAIGenerationJobs(userID string) []model.AIGenerationJob
 	GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error)
 	UpdateAIGenerationJob(job model.AIGenerationJob) error
 	Close() error

@@ -318,7 +318,35 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 		}
 		c.JSON(http.StatusAccepted, job)
 	})
+	protected.POST("/ai/generate-jobs", func(c *gin.Context) {
+		var request model.AIGenerateRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := resolveGenerationPolicy(c, services, &request); err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		job, err := services.CreateAIGenerationJob(userIDFromContext(c), request)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, job)
+	})
+	protected.GET("/ai/generate-jobs", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"items": services.ListAIGenerationJobs(userIDFromContext(c))})
+	})
 	protected.GET("/ai/generate-job/:id", func(c *gin.Context) {
+		job, err := services.GetAIGenerationJob(userIDFromContext(c), c.Param("id"))
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, job)
+	})
+	protected.GET("/ai/generate-jobs/:id", func(c *gin.Context) {
 		job, err := services.GetAIGenerationJob(userIDFromContext(c), c.Param("id"))
 		if err != nil {
 			writeRepoError(c, err)
@@ -359,6 +387,40 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 			return
 		}
 		c.JSON(http.StatusOK, response)
+	})
+	protected.POST("/ai/import-file-job", func(c *gin.Context) {
+		file, err := c.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing file"})
+			return
+		}
+		cardCount, _ := strconv.Atoi(c.PostForm("card_count"))
+		request := model.AIGenerateRequest{
+			Topic:      c.PostForm("topic"),
+			CardCount:  cardCount,
+			Difficulty: c.PostForm("difficulty"),
+			Strategy:   c.PostForm("strategy"),
+			CardTypes:  splitCSV(c.PostForm("card_types")),
+			PolicyID:   c.PostForm("policy_id"),
+		}
+		if rawPolicy := strings.TrimSpace(c.PostForm("policy_json")); rawPolicy != "" {
+			var policy model.GenerationPolicy
+			if err := json.Unmarshal([]byte(rawPolicy), &policy); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid policy_json"})
+				return
+			}
+			request.Policy = &policy
+		}
+		if err := resolveGenerationPolicy(c, services, &request); err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		job, err := services.CreateAIGenerationJobFromUpload(userIDFromContext(c), request, file)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, job)
 	})
 	protected.POST("/ai/rewrite-card", func(c *gin.Context) {
 		var request model.AIRewriteCardRequest

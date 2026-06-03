@@ -128,16 +128,22 @@ label {
   margin-bottom: 16px;
 }
 .section-title h2 { margin: 0; }
-.list, .cards, .drafts {
+.list, .cards, .drafts, .jobs {
   display: grid;
   gap: 10px;
   margin-top: 16px;
 }
-.deck-item, .card-item, .draft-item {
+.deck-item, .card-item, .draft-item, .job-item {
   border: 1px solid var(--line);
   border-radius: 18px;
   padding: 14px;
   background: rgba(255, 250, 242, 0.78);
+}
+.job-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
 }
 .deck-item {
   cursor: pointer;

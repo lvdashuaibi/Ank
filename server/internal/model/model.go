@@ -210,14 +210,16 @@ type AICardReference struct {
 }
 
 type AICardChatRequest struct {
-	Topic       string              `json:"topic"`
-	Instruction string              `json:"instruction"`
-	CardCount   int                 `json:"card_count,omitempty"`
-	Difficulty  string              `json:"difficulty,omitempty"`
-	Messages    []AICardChatMessage `json:"messages,omitempty"`
-	Items       []AIGeneratedCard   `json:"items,omitempty"`
-	Reference   *AICardReference    `json:"reference,omitempty"`
-	Policy      *GenerationPolicy   `json:"policy,omitempty"`
+	Topic           string              `json:"topic"`
+	Instruction     string              `json:"instruction"`
+	Operation       string              `json:"operation,omitempty"`
+	CardCount       int                 `json:"card_count,omitempty"`
+	Difficulty      string              `json:"difficulty,omitempty"`
+	Messages        []AICardChatMessage `json:"messages,omitempty"`
+	Items           []AIGeneratedCard   `json:"items,omitempty"`
+	SelectedIndexes []int               `json:"selected_indexes,omitempty"`
+	Reference       *AICardReference    `json:"reference,omitempty"`
+	Policy          *GenerationPolicy   `json:"policy,omitempty"`
 }
 
 type AICardChatResponse struct {

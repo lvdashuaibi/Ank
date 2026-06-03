@@ -114,6 +114,38 @@ void main() {
     expect(summary.images.single.isRemote, isFalse);
   });
 
+  test('AI generation job parses recoverable draft result', () {
+    final AIGenerationJob job = AIGenerationJob.fromJson(<String, dynamic>{
+      'id': 'job-1',
+      'source_name': 'education.md',
+      'source_type': 'text/markdown',
+      'status': 'succeeded',
+      'progress': 1,
+      'created_at': DateTime.now().toIso8601String(),
+      'updated_at': DateTime.now().toIso8601String(),
+      'result': <String, dynamic>{
+        'document': <String, dynamic>{
+          'title': 'education.md',
+          'mime_type': 'text/markdown',
+          'text_preview': '教育目的',
+          'text_length': 4,
+        },
+        'items': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'title': '教育目的',
+            'content': '教育目的是什么？\n\n@answer\n培养人的质量规格。\n@end',
+            'tags': <String>['AI生成'],
+            'note': '',
+          },
+        ],
+      },
+    });
+
+    expect(job.hasResult, isTrue);
+    expect(job.document?.title, 'education.md');
+    expect(job.resultItems.single.title, '教育目的');
+  });
+
   test('copyWith can clear generated document summary', () {
     final AppState state = AppState(
       decks: const <DeckModel>[],

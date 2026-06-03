@@ -192,4 +192,8 @@ func TestMemoryStoreAIGenerationJobCRUD(t *testing.T) {
 	if updated.Result == nil || len(updated.Result.Items) != 1 {
 		t.Fatalf("expected persisted job result, got %+v", updated)
 	}
+
+	if items := store.ListAIGenerationJobs("user-1"); len(items) != 1 || items[0].ID != "job-1" {
+		t.Fatalf("expected list to return user's job, got %+v", items)
+	}
 }

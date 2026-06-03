@@ -2160,9 +2160,7 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   late final TextEditingController _topicController;
   final TextEditingController _contextController = TextEditingController();
-  final TextEditingController _countController = TextEditingController(
-    text: '6',
-  );
+  final TextEditingController _countController = TextEditingController();
   final TextEditingController _maxAnswerCharsController = TextEditingController(
     text: '80',
   );
@@ -2176,13 +2174,14 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
   bool _pickingFile = false;
   bool _saving = false;
   bool _chatSending = false;
+  bool _jobsExpanded = true;
   PlatformFile? _selectedFile;
   String? _inlineError;
-  _AICardQuote? _activeQuote;
+  final Set<int> _selectedDraftIndexes = <int>{};
   final List<_AICardChatMessage> _chatMessages = <_AICardChatMessage>[
     const _AICardChatMessage(
       role: 'assistant',
-      content: '可以直接告诉我你想怎么设计卡片。生成后，也可以引用右侧/下方某张卡的题干或答案让我继续微调。',
+      content: '可以直接告诉我你想怎么设计卡片。生成后，点进任意单张草稿就能继续微调。',
     ),
   ];
 
@@ -2190,6 +2189,10 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
   void initState() {
     super.initState();
     _topicController = TextEditingController(text: widget.deck.name);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(appStoreProvider.notifier).refreshAIGenerationJobs();
+    });
   }
 
   @override
@@ -2301,10 +2304,7 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
                         _AIChatDesignerPanel(
                           controller: _chatController,
                           messages: _chatMessages,
-                          quote: _activeQuote,
                           sending: _chatSending || state.syncInProgress,
-                          onClearQuote: () =>
-                              setState(() => _activeQuote = null),
                           onSend: _sendChatMessage,
                         ),
                         const SizedBox(height: 12),
@@ -2338,17 +2338,19 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
                                   controller: _countController,
                                   keyboardType: TextInputType.number,
                                   decoration: const InputDecoration(
-                                    labelText: '生成数量',
-                                    hintText: '6',
+                                    labelText: '生成数量（可选）',
+                                    hintText: '留空，由 AI 根据材料自动拆分',
                                   ),
                                   validator: (String? value) {
-                                    final int? parsed = int.tryParse(
-                                      (value ?? '').trim(),
-                                    );
+                                    final String raw = (value ?? '').trim();
+                                    if (raw.isEmpty) {
+                                      return null;
+                                    }
+                                    final int? parsed = int.tryParse(raw);
                                     if (parsed == null ||
                                         parsed < 1 ||
                                         parsed > 20) {
-                                      return '请输入 1-20';
+                                      return '请输入 1-20，或留空';
                                     }
                                     return null;
                                   },
@@ -2544,17 +2546,46 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
                     ),
                   ],
                   const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: state.syncInProgress ? null : _generate,
-                    icon: state.syncInProgress
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.auto_awesome_outlined),
-                    label: Text(state.syncInProgress ? '生成中…' : '生成草稿'),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: state.syncInProgress ? null : _generate,
+                          icon: state.syncInProgress
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.auto_awesome_outlined),
+                          label: Text(state.syncInProgress ? '生成中…' : '生成草稿'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: state.syncInProgress
+                              ? null
+                              : _startBackgroundGeneration,
+                          icon: const Icon(Icons.cloud_sync_outlined),
+                          label: const Text('后台生成'),
+                        ),
+                      ),
+                    ],
                   ),
+                  if (state.aiGenerationJobs.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 12),
+                    _AIGenerationJobsCard(
+                      jobs: state.aiGenerationJobs,
+                      expanded: _jobsExpanded,
+                      onToggleExpanded: () =>
+                          setState(() => _jobsExpanded = !_jobsExpanded),
+                      onRefresh: state.syncInProgress ? null : _refreshJobs,
+                      onApply: _applyJobResult,
+                    ),
+                  ],
                   if (generated.isNotEmpty) ...<Widget>[
                     const SizedBox(height: 18),
                     if (document != null) ...<Widget>[
@@ -2563,20 +2594,72 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
                     ],
                     _SectionHeader(
                       title: '生成结果',
-                      subtitle: '检查草稿内容后保存到当前牌组，之后仍可逐张编辑。',
+                      subtitle:
+                          '已选择 ${_effectiveSelectedDraftIndexes(generated.length).length} / ${generated.length} 张，可部分保存、单张微调或合并所选。',
                     ),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: <Widget>[
+                        ActionChip(
+                          avatar: const Icon(Icons.done_all_rounded, size: 18),
+                          label: const Text('全选'),
+                          onPressed: _saving
+                              ? null
+                              : () => setState(() {
+                                  _selectedDraftIndexes
+                                    ..clear()
+                                    ..addAll(
+                                      Iterable<int>.generate(generated.length),
+                                    );
+                                }),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(
+                            Icons.remove_done_rounded,
+                            size: 18,
+                          ),
+                          label: const Text('取消选择'),
+                          onPressed: _saving
+                              ? null
+                              : () => setState(_selectedDraftIndexes.clear),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(
+                            Icons.call_merge_rounded,
+                            size: 18,
+                          ),
+                          label: const Text('合并所选'),
+                          onPressed:
+                              _effectiveSelectedDraftIndexes(
+                                        generated.length,
+                                      ).length <
+                                      2 ||
+                                  state.syncInProgress ||
+                                  _saving
+                              ? null
+                              : _mergeSelectedDrafts,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
                     for (int index = 0; index < generated.length; index += 1)
                       _GeneratedCardPreview(
                         index: index,
                         item: generated[index],
+                        selected: _effectiveSelectedDraftIndexes(
+                          generated.length,
+                        ).contains(index),
+                        onSelectedChanged: _saving
+                            ? null
+                            : (bool selected) =>
+                                  _setDraftSelected(index, selected),
                         onRewrite: state.syncInProgress || _saving
                             ? null
-                            : () => _rewriteGeneratedCard(
-                                index,
-                                generated[index],
-                              ),
-                        onQuote: (String part) =>
-                            _quoteGeneratedCard(index, generated[index], part),
+                            : () => _openGeneratedCardChat(index),
+                        onSplit: state.syncInProgress || _saving
+                            ? null
+                            : () => _splitGeneratedCard(index),
                       ),
                     const SizedBox(height: 10),
                     SwitchListTile(
@@ -2614,7 +2697,11 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
                                     ),
                                   )
                                 : const Icon(Icons.save_outlined),
-                            label: Text(_saving ? '保存中…' : '保存到牌组'),
+                            label: Text(
+                              _saving
+                                  ? '保存中…'
+                                  : '保存所选 ${_effectiveSelectedDraftIndexes(generated.length).length} 张',
+                            ),
                           ),
                         ),
                       ],
@@ -2635,6 +2722,7 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
     }
     setState(() => _inlineError = null);
     final GenerationPolicy policy = _buildPolicy();
+    final int cardCount = _requestedCardCount();
     if (_sourceMode == _AIGenerateSourceMode.file) {
       final PlatformFile? file = _selectedFile;
       if (file == null || file.bytes == null) {
@@ -2647,10 +2735,11 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
             filename: file.name,
             bytes: file.bytes!,
             topic: _topicController.text.trim(),
-            cardCount: int.parse(_countController.text.trim()),
+            cardCount: cardCount,
             difficulty: _difficulty,
             policy: policy,
           );
+      _selectAllGeneratedDrafts();
       return;
     }
     await ref
@@ -2658,10 +2747,95 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
         .generateCards(
           topic: _topicController.text.trim(),
           context: _contextController.text.trim(),
-          cardCount: int.parse(_countController.text.trim()),
+          cardCount: cardCount,
           difficulty: _difficulty,
           policy: policy,
         );
+    _selectAllGeneratedDrafts();
+  }
+
+  Future<void> _startBackgroundGeneration() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    setState(() => _inlineError = null);
+    final AppStore store = ref.read(appStoreProvider.notifier);
+    final GenerationPolicy policy = _buildPolicy();
+    final int cardCount = _requestedCardCount();
+    AIGenerationJob? job;
+    if (_sourceMode == _AIGenerateSourceMode.file) {
+      final PlatformFile? file = _selectedFile;
+      if (file == null || file.bytes == null) {
+        setState(() => _inlineError = '请选择 PDF、TXT 或 Markdown 文件');
+        return;
+      }
+      job = await store.startAIGenerationJobFromFile(
+        filename: file.name,
+        bytes: file.bytes!,
+        topic: _topicController.text.trim(),
+        cardCount: cardCount,
+        difficulty: _difficulty,
+        policy: policy,
+      );
+    } else {
+      job = await store.startAIGenerationJob(
+        topic: _topicController.text.trim(),
+        context: _contextController.text.trim(),
+        cardCount: cardCount,
+        difficulty: _difficulty,
+        policy: policy,
+      );
+    }
+    if (!mounted || job == null) {
+      return;
+    }
+    setState(() {
+      _jobsExpanded = true;
+      _inlineError = '已转入后台生成，可关闭窗口，稍后从后台任务取回结果。';
+    });
+  }
+
+  int _requestedCardCount() {
+    return int.tryParse(_countController.text.trim()) ?? 0;
+  }
+
+  void _selectAllGeneratedDrafts() {
+    if (!mounted) return;
+    final int count = ref.read(appStoreProvider).generatedCards.length;
+    setState(() {
+      _selectedDraftIndexes
+        ..clear()
+        ..addAll(Iterable<int>.generate(count));
+    });
+  }
+
+  Set<int> _effectiveSelectedDraftIndexes(int draftCount) {
+    final Set<int> selected = _selectedDraftIndexes
+        .where((int index) => index >= 0 && index < draftCount)
+        .toSet();
+    if (selected.isEmpty && draftCount > 0) {
+      return Set<int>.from(Iterable<int>.generate(draftCount));
+    }
+    return selected;
+  }
+
+  void _setDraftSelected(int index, bool selected) {
+    setState(() {
+      if (selected) {
+        _selectedDraftIndexes.add(index);
+      } else {
+        _selectedDraftIndexes.remove(index);
+      }
+    });
+  }
+
+  Future<void> _refreshJobs() async {
+    await ref.read(appStoreProvider.notifier).refreshAIGenerationJobs();
+  }
+
+  void _applyJobResult(AIGenerationJob job) {
+    ref.read(appStoreProvider.notifier).applyAIGenerationJobResult(job);
+    _selectAllGeneratedDrafts();
   }
 
   Future<void> _sendChatMessage() async {
@@ -2669,10 +2843,9 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
     if (text.isEmpty || _chatSending) {
       return;
     }
-    final _AICardQuote? quote = _activeQuote;
     final _AICardChatMessage userMessage = _AICardChatMessage(
       role: 'user',
-      content: quote == null ? text : '$text\n（引用：${quote.label}）',
+      content: text,
     );
     setState(() {
       _chatMessages.add(userMessage);
@@ -2685,7 +2858,7 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
         .chatWithGeneratedCards(
           topic: _topicController.text.trim(),
           instruction: text,
-          cardCount: int.tryParse(_countController.text.trim()) ?? 4,
+          cardCount: _requestedCardCount(),
           difficulty: _difficulty,
           messages: _chatMessages
               .map(
@@ -2695,7 +2868,6 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
                 },
               )
               .toList(),
-          reference: quote?.toJson(),
           policy: _buildPolicy(),
         );
     if (!mounted) {
@@ -2703,7 +2875,6 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
     }
     setState(() {
       _chatSending = false;
-      _activeQuote = null;
       if (response != null && response.assistantMessage.trim().isNotEmpty) {
         _chatMessages.add(
           _AICardChatMessage(
@@ -2713,28 +2884,9 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
         );
       }
     });
-  }
-
-  void _quoteGeneratedCard(int index, AIGeneratedCard item, String part) {
-    final CardDocumentParts parts = CardDocumentCodec.parse(item.content);
-    final String text = switch (part) {
-      'prompt' => parts.prompt,
-      'answer' => parts.answer,
-      _ => '${item.title}\n\n${item.content}',
-    };
-    final String label = switch (part) {
-      'prompt' => '第 ${index + 1} 张 · 题干',
-      'answer' => '第 ${index + 1} 张 · 答案',
-      _ => '第 ${index + 1} 张 · 整卡',
-    };
-    setState(() {
-      _activeQuote = _AICardQuote(
-        cardIndex: index,
-        part: part,
-        label: label,
-        text: text,
-      );
-    });
+    if (response != null) {
+      _selectAllGeneratedDrafts();
+    }
   }
 
   GenerationPolicy _buildPolicy() {
@@ -2798,34 +2950,86 @@ class _AIGenerateCardsSheetState extends ConsumerState<_AIGenerateCardsSheet> {
   }
 
   Future<void> _saveGenerated() async {
+    final int draftCount = ref.read(appStoreProvider).generatedCards.length;
+    final Set<int> selected = _effectiveSelectedDraftIndexes(draftCount);
+    if (selected.isEmpty) {
+      setState(() => _inlineError = '请选择至少一张要保存的草稿');
+      return;
+    }
     setState(() {
       _saving = true;
       _inlineError = null;
     });
     await ref
         .read(appStoreProvider.notifier)
-        .saveGeneratedCardsToDeck(widget.deck.id, studyEnabled: _saveToReview);
+        .saveGeneratedCardsToDeck(
+          widget.deck.id,
+          studyEnabled: _saveToReview,
+          selectedIndexes: selected.toList(),
+        );
     if (!mounted) {
       return;
     }
     setState(() => _saving = false);
-    Navigator.of(context).pop(true);
+    if (ref.read(appStoreProvider).generatedCards.isEmpty) {
+      Navigator.of(context).pop(true);
+    } else {
+      _selectAllGeneratedDrafts();
+    }
   }
 
-  Future<void> _rewriteGeneratedCard(int index, AIGeneratedCard item) async {
-    final AIRewriteCandidate? candidate =
-        await showModalBottomSheet<AIRewriteCandidate>(
-          context: context,
-          isScrollControlled: true,
-          builder: (BuildContext context) =>
-              _AIGeneratedDraftRewriteSheet(item: item),
-        );
-    if (!mounted || candidate == null) {
+  Future<void> _openGeneratedCardChat(int index) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (BuildContext context) => _AIGeneratedDraftChatSheet(
+        cardIndex: index,
+        topic: _topicController.text.trim(),
+        difficulty: _difficulty,
+        policy: _buildPolicy(),
+      ),
+    );
+    if (!mounted) {
       return;
     }
-    ref
+    _selectAllGeneratedDrafts();
+  }
+
+  Future<void> _splitGeneratedCard(int index) async {
+    final AICardChatResponse? response = await ref
         .read(appStoreProvider.notifier)
-        .replaceGeneratedCard(index, item.applyRewrite(candidate));
+        .chatWithGeneratedCards(
+          topic: _topicController.text.trim(),
+          instruction: '请把这张卡拆成多张更小、更原子的卡片。',
+          operation: 'split',
+          selectedIndexes: <int>[index],
+          cardCount: 0,
+          difficulty: _difficulty,
+          messages: const <Map<String, String>>[],
+          policy: _buildPolicy(),
+        );
+    if (mounted && response != null) {
+      _selectAllGeneratedDrafts();
+    }
+  }
+
+  Future<void> _mergeSelectedDrafts() async {
+    final List<int> selected = _effectiveSelectedDraftIndexes(
+      ref.read(appStoreProvider).generatedCards.length,
+    ).toList()..sort();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (BuildContext context) => _AIMergeDraftsSheet(
+        selectedIndexes: selected,
+        topic: _topicController.text.trim(),
+        difficulty: _difficulty,
+        policy: _buildPolicy(),
+      ),
+    );
+    if (mounted) {
+      _selectAllGeneratedDrafts();
+    }
   }
 }
 
@@ -2836,43 +3040,17 @@ class _AICardChatMessage {
   final String content;
 }
 
-class _AICardQuote {
-  const _AICardQuote({
-    required this.cardIndex,
-    required this.part,
-    required this.label,
-    required this.text,
-  });
-
-  final int cardIndex;
-  final String part;
-  final String label;
-  final String text;
-
-  Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'card_index': cardIndex,
-      'part': part,
-      'text': text,
-    };
-  }
-}
-
 class _AIChatDesignerPanel extends StatelessWidget {
   const _AIChatDesignerPanel({
     required this.controller,
     required this.messages,
-    required this.quote,
     required this.sending,
-    required this.onClearQuote,
     required this.onSend,
   });
 
   final TextEditingController controller;
   final List<_AICardChatMessage> messages;
-  final _AICardQuote? quote;
   final bool sending;
-  final VoidCallback onClearQuote;
   final VoidCallback onSend;
 
   @override
@@ -2921,14 +3099,6 @@ class _AIChatDesignerPanel extends StatelessWidget {
                 },
               ),
             ),
-            if (quote != null) ...<Widget>[
-              const SizedBox(height: 10),
-              InputChip(
-                avatar: const Icon(Icons.link_rounded, size: 18),
-                label: Text('正在引用：${quote!.label}'),
-                onDeleted: onClearQuote,
-              ),
-            ],
             const SizedBox(height: 10),
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -3004,18 +3174,486 @@ class _AIChatBubble extends StatelessWidget {
   }
 }
 
+class _AIGenerationJobsCard extends StatelessWidget {
+  const _AIGenerationJobsCard({
+    required this.jobs,
+    required this.expanded,
+    required this.onToggleExpanded,
+    required this.onRefresh,
+    required this.onApply,
+  });
+
+  final List<AIGenerationJob> jobs;
+  final bool expanded;
+  final VoidCallback onToggleExpanded;
+  final VoidCallback? onRefresh;
+  final ValueChanged<AIGenerationJob> onApply;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Card(
+      color: theme.colorScheme.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Icon(
+                  Icons.cloud_done_outlined,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('后台任务', style: theme.textTheme.titleMedium),
+                ),
+                IconButton(
+                  onPressed: onRefresh,
+                  icon: const Icon(Icons.refresh_rounded),
+                  tooltip: '刷新任务',
+                ),
+                IconButton(
+                  onPressed: onToggleExpanded,
+                  icon: Icon(
+                    expanded
+                        ? Icons.expand_less_rounded
+                        : Icons.expand_more_rounded,
+                  ),
+                  tooltip: expanded ? '收起' : '展开',
+                ),
+              ],
+            ),
+            if (expanded) ...<Widget>[
+              const SizedBox(height: 8),
+              for (final AIGenerationJob job in jobs.take(5))
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _AIGenerationJobTile(job: job, onApply: onApply),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AIGenerationJobTile extends StatelessWidget {
+  const _AIGenerationJobTile({required this.job, required this.onApply});
+
+  final AIGenerationJob job;
+  final ValueChanged<AIGenerationJob> onApply;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final String title = job.sourceName.trim().isEmpty
+        ? '后台生成任务'
+        : job.sourceName;
+    final bool running = job.status == 'running';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: <Widget>[
+            running
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(
+                    job.status == 'succeeded'
+                        ? Icons.check_circle_outline_rounded
+                        : Icons.error_outline_rounded,
+                    color: job.status == 'succeeded'
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.error,
+                  ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 2),
+                  Text(
+                    job.status == 'succeeded'
+                        ? '${job.resultItems.length} 张草稿可取回'
+                        : job.status == 'failed'
+                        ? firstNonEmptyLine(job.errorMessage) ?? '生成失败'
+                        : '生成中 ${(job.progress.clamp(0, 1) * 100).round()}%',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            TextButton(
+              onPressed: job.hasResult ? () => onApply(job) : null,
+              child: const Text('取回'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AIGeneratedDraftChatSheet extends ConsumerStatefulWidget {
+  const _AIGeneratedDraftChatSheet({
+    required this.cardIndex,
+    required this.topic,
+    required this.difficulty,
+    required this.policy,
+  });
+
+  final int cardIndex;
+  final String topic;
+  final String difficulty;
+  final GenerationPolicy policy;
+
+  @override
+  ConsumerState<_AIGeneratedDraftChatSheet> createState() =>
+      _AIGeneratedDraftChatSheetState();
+}
+
+class _AIGeneratedDraftChatSheetState
+    extends ConsumerState<_AIGeneratedDraftChatSheet> {
+  final TextEditingController _controller = TextEditingController();
+  final List<_AICardChatMessage> _messages = <_AICardChatMessage>[
+    const _AICardChatMessage(
+      role: 'assistant',
+      content: '我会只围绕这张草稿调整；也可以直接让我拆成多张更小的卡。',
+    ),
+  ];
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppState state = ref.watch(appStoreProvider);
+    final ThemeData theme = Theme.of(context);
+    final AIGeneratedCard? item =
+        widget.cardIndex >= 0 && widget.cardIndex < state.generatedCards.length
+        ? state.generatedCards[widget.cardIndex]
+        : null;
+    final CardDocumentParts parts = CardDocumentCodec.parse(
+      item?.content ?? '',
+    );
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 12,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          '微调第 ${widget.cardIndex + 1} 张草稿',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _sending
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded),
+                        tooltip: '关闭',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  _GeneratedDraftSnippet(
+                    title: item?.title ?? '当前草稿',
+                    prompt: parts.prompt,
+                    answer: parts.answer,
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    constraints: const BoxConstraints(maxHeight: 220),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+                    ),
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      reverse: true,
+                      itemCount: _messages.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
+                      itemBuilder: (BuildContext context, int reversedIndex) {
+                        final int index = _messages.length - 1 - reversedIndex;
+                        return _AIChatBubble(message: _messages[index]);
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: TextField(
+                          controller: _controller,
+                          minLines: 1,
+                          maxLines: 4,
+                          decoration: const InputDecoration(
+                            labelText: '告诉 AI 如何改这张卡',
+                            hintText: '例如：答案更短，题干更像考试题。',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      IconButton.filled(
+                        onPressed: _sending ? null : () => _send('refine'),
+                        icon: _sending
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.send_rounded),
+                        tooltip: '发送',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _sending ? null : () => _send('split'),
+                    icon: const Icon(Icons.call_split_rounded),
+                    label: const Text('拆成多张原子卡'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _send(String operation) async {
+    final String text = _controller.text.trim();
+    final String instruction = operation == 'split' && text.isEmpty
+        ? '请拆成多张更小、更原子的卡片。'
+        : text;
+    if (instruction.isEmpty || _sending) {
+      return;
+    }
+    setState(() {
+      _messages.add(_AICardChatMessage(role: 'user', content: instruction));
+      _controller.clear();
+      _sending = true;
+    });
+    final AICardChatResponse? response = await ref
+        .read(appStoreProvider.notifier)
+        .chatWithGeneratedCards(
+          topic: widget.topic,
+          instruction: instruction,
+          operation: operation,
+          selectedIndexes: <int>[widget.cardIndex],
+          cardCount: 0,
+          difficulty: widget.difficulty,
+          messages: _messages
+              .map(
+                (_AICardChatMessage message) => <String, String>{
+                  'role': message.role,
+                  'content': message.content,
+                },
+              )
+              .toList(),
+          policy: widget.policy,
+        );
+    if (!mounted) return;
+    setState(() {
+      _sending = false;
+      if (response != null && response.assistantMessage.trim().isNotEmpty) {
+        _messages.add(
+          _AICardChatMessage(
+            role: 'assistant',
+            content: response.assistantMessage,
+          ),
+        );
+      }
+    });
+  }
+}
+
+class _AIMergeDraftsSheet extends ConsumerStatefulWidget {
+  const _AIMergeDraftsSheet({
+    required this.selectedIndexes,
+    required this.topic,
+    required this.difficulty,
+    required this.policy,
+  });
+
+  final List<int> selectedIndexes;
+  final String topic;
+  final String difficulty;
+  final GenerationPolicy policy;
+
+  @override
+  ConsumerState<_AIMergeDraftsSheet> createState() =>
+      _AIMergeDraftsSheetState();
+}
+
+class _AIMergeDraftsSheetState extends ConsumerState<_AIMergeDraftsSheet> {
+  final TextEditingController _controller = TextEditingController(
+    text: '合并成一张对比卡，保留核心区别和联系。',
+  );
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AppState state = ref.watch(appStoreProvider);
+    final ThemeData theme = Theme.of(context);
+    final List<AIGeneratedCard> selected = widget.selectedIndexes
+        .where((int index) => index >= 0 && index < state.generatedCards.length)
+        .map((int index) => state.generatedCards[index])
+        .toList();
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 12,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Text(
+                        '合并 ${selected.length} 张草稿',
+                        style: theme.textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: _sending
+                          ? null
+                          : () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close_rounded),
+                      tooltip: '关闭',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                for (final AIGeneratedCard item in selected.take(4))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _GeneratedDraftSnippet(
+                      title: item.title,
+                      prompt: CardDocumentCodec.promptPreview(item.content),
+                      answer: CardDocumentCodec.parse(item.content).answer,
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _controller,
+                  minLines: 2,
+                  maxLines: 4,
+                  decoration: const InputDecoration(labelText: '合并要求'),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: _sending ? null : _merge,
+                  icon: _sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.call_merge_rounded),
+                  label: Text(_sending ? '合并中…' : '合并所选草稿'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _merge() async {
+    setState(() => _sending = true);
+    final AICardChatResponse? response = await ref
+        .read(appStoreProvider.notifier)
+        .chatWithGeneratedCards(
+          topic: widget.topic,
+          instruction: _controller.text.trim(),
+          operation: 'merge',
+          selectedIndexes: widget.selectedIndexes,
+          cardCount: 0,
+          difficulty: widget.difficulty,
+          messages: const <Map<String, String>>[],
+          policy: widget.policy,
+        );
+    if (!mounted) return;
+    setState(() => _sending = false);
+    if (response != null) {
+      Navigator.of(context).pop();
+    }
+  }
+}
+
 class _GeneratedCardPreview extends StatelessWidget {
   const _GeneratedCardPreview({
     required this.index,
     required this.item,
+    required this.selected,
+    required this.onSelectedChanged,
     required this.onRewrite,
-    required this.onQuote,
+    required this.onSplit,
   });
 
   final int index;
   final AIGeneratedCard item;
+  final bool selected;
+  final ValueChanged<bool>? onSelectedChanged;
   final VoidCallback? onRewrite;
-  final ValueChanged<String> onQuote;
+  final VoidCallback? onSplit;
 
   @override
   Widget build(BuildContext context) {
@@ -3032,6 +3670,13 @@ class _GeneratedCardPreview extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
+                Checkbox(
+                  value: selected,
+                  onChanged: onSelectedChanged == null
+                      ? null
+                      : (bool? value) => onSelectedChanged!(value ?? false),
+                ),
+                const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     item.title.isEmpty ? '未命名卡片' : item.title,
@@ -3043,6 +3688,11 @@ class _GeneratedCardPreview extends StatelessWidget {
                   onPressed: onRewrite,
                   icon: const Icon(Icons.auto_fix_high_outlined, size: 18),
                   label: const Text('微调'),
+                ),
+                IconButton(
+                  onPressed: onSplit,
+                  icon: const Icon(Icons.call_split_rounded),
+                  tooltip: '拆成多张',
                 ),
               ],
             ),
@@ -3107,29 +3757,6 @@ class _GeneratedCardPreview extends StatelessWidget {
                 ),
               ),
             ],
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: <Widget>[
-                ActionChip(
-                  avatar: const Icon(Icons.format_quote_rounded, size: 18),
-                  label: Text('引用第 ${index + 1} 张'),
-                  onPressed: () => onQuote('card'),
-                ),
-                ActionChip(
-                  avatar: const Icon(Icons.subject_rounded, size: 18),
-                  label: const Text('引用题干'),
-                  onPressed: () => onQuote('prompt'),
-                ),
-                if (parts.answer.trim().isNotEmpty)
-                  ActionChip(
-                    avatar: const Icon(Icons.fact_check_outlined, size: 18),
-                    label: const Text('引用答案'),
-                    onPressed: () => onQuote('answer'),
-                  ),
-              ],
-            ),
           ],
         ),
       ),

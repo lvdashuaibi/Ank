@@ -527,6 +527,55 @@ class AICardChatResponse {
   }
 }
 
+class AIGenerationJob {
+  const AIGenerationJob({
+    required this.id,
+    required this.status,
+    required this.progress,
+    required this.createdAt,
+    required this.updatedAt,
+    this.sourceName = '',
+    this.sourceType = '',
+    this.errorMessage = '',
+    this.resultItems = const <AIGeneratedCard>[],
+    this.document,
+  });
+
+  final String id;
+  final String sourceName;
+  final String sourceType;
+  final String status;
+  final double progress;
+  final String errorMessage;
+  final List<AIGeneratedCard> resultItems;
+  final AIDocumentSummary? document;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  bool get isComplete => status == 'succeeded' || status == 'failed';
+  bool get hasResult => resultItems.isNotEmpty;
+
+  factory AIGenerationJob.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> result = _coerceMap(json['result']);
+    return AIGenerationJob(
+      id: (json['id'] ?? '') as String,
+      sourceName: (json['source_name'] ?? '') as String,
+      sourceType: (json['source_type'] ?? '') as String,
+      status: (json['status'] ?? '') as String,
+      progress: ((json['progress'] as num?) ?? 0).toDouble(),
+      errorMessage: (json['error_message'] ?? '') as String,
+      resultItems: _coerceMapList(
+        result['items'],
+      ).map(AIGeneratedCard.fromJson).toList(),
+      document: result['document'] is Map
+          ? AIDocumentSummary.fromJson(_coerceMap(result['document']))
+          : null,
+      createdAt: _parseDate(json['created_at']) ?? DateTime.now(),
+      updatedAt: _parseDate(json['updated_at']) ?? DateTime.now(),
+    );
+  }
+}
+
 class AIDocumentSummary {
   const AIDocumentSummary({
     required this.title,
@@ -625,6 +674,7 @@ class AppState {
     required this.syncInProgress,
     required this.pendingOperations,
     required this.generatedCards,
+    this.aiGenerationJobs = const <AIGenerationJob>[],
     this.generatedDocument,
     this.rewriteCandidates = const <AIRewriteCandidate>[],
     this.accessToken,
@@ -645,6 +695,7 @@ class AppState {
   final bool syncInProgress;
   final List<SyncOperation> pendingOperations;
   final List<AIGeneratedCard> generatedCards;
+  final List<AIGenerationJob> aiGenerationJobs;
   final AIDocumentSummary? generatedDocument;
   final List<AIRewriteCandidate> rewriteCandidates;
   final String? accessToken;
@@ -668,6 +719,7 @@ class AppState {
     bool? syncInProgress,
     List<SyncOperation>? pendingOperations,
     List<AIGeneratedCard>? generatedCards,
+    List<AIGenerationJob>? aiGenerationJobs,
     AIDocumentSummary? generatedDocument,
     List<AIRewriteCandidate>? rewriteCandidates,
     String? accessToken,
@@ -693,6 +745,7 @@ class AppState {
       syncInProgress: syncInProgress ?? this.syncInProgress,
       pendingOperations: pendingOperations ?? this.pendingOperations,
       generatedCards: generatedCards ?? this.generatedCards,
+      aiGenerationJobs: aiGenerationJobs ?? this.aiGenerationJobs,
       generatedDocument: clearGeneratedDocument
           ? null
           : generatedDocument ?? this.generatedDocument,
@@ -1901,12 +1954,31 @@ class AppStore extends StateNotifier<AppState> {
   Future<void> saveGeneratedCardsToDeck(
     String deckId, {
     bool studyEnabled = false,
+    List<int>? selectedIndexes,
   }) async {
     if (state.generatedCards.isEmpty) {
       return;
     }
-    for (final AIGeneratedCard item in state.generatedCards) {
-      await createCard(
+    final Set<int> selected =
+        (selectedIndexes == null || selectedIndexes.isEmpty)
+        ? Set<int>.from(Iterable<int>.generate(state.generatedCards.length))
+        : selectedIndexes
+              .where(
+                (int index) =>
+                    index >= 0 && index < state.generatedCards.length,
+              )
+              .toSet();
+    if (selected.isEmpty) {
+      state = state.copyWith(errorMessage: '请选择要保存的 AI 草稿');
+      return;
+    }
+    final Set<int> saved = <int>{};
+    for (int index = 0; index < state.generatedCards.length; index += 1) {
+      if (!selected.contains(index)) {
+        continue;
+      }
+      final AIGeneratedCard item = state.generatedCards[index];
+      final bool ok = await createCard(
         deckId: deckId,
         title: item.title,
         content: item.content,
@@ -1914,8 +1986,21 @@ class AppStore extends StateNotifier<AppState> {
         tags: item.tags,
         studyEnabled: studyEnabled,
       );
+      if (ok) {
+        saved.add(index);
+      }
     }
-    clearGeneratedCards();
+    final List<AIGeneratedCard> remaining = <AIGeneratedCard>[];
+    for (int index = 0; index < state.generatedCards.length; index += 1) {
+      if (!saved.contains(index)) {
+        remaining.add(state.generatedCards[index]);
+      }
+    }
+    state = state.copyWith(
+      generatedCards: remaining,
+      clearGeneratedDocument: remaining.isEmpty,
+      clearError: saved.isNotEmpty,
+    );
   }
 
   Future<bool> updateCard({
@@ -2442,6 +2527,8 @@ class AppStore extends StateNotifier<AppState> {
     required int cardCount,
     required String difficulty,
     required List<Map<String, String>> messages,
+    String? operation,
+    List<int> selectedIndexes = const <int>[],
     Map<String, dynamic>? reference,
     GenerationPolicy? policy,
   }) async {
@@ -2462,6 +2549,8 @@ class AppStore extends StateNotifier<AppState> {
         items: state.generatedCards
             .map((AIGeneratedCard item) => item.toJson())
             .toList(),
+        operation: operation,
+        selectedIndexes: selectedIndexes,
         reference: reference,
         policy: policy?.toJson(),
       );
@@ -2499,6 +2588,162 @@ class AppStore extends StateNotifier<AppState> {
     ];
     next[index] = card;
     state = state.copyWith(generatedCards: next, clearError: true);
+  }
+
+  void replaceGeneratedCards(List<AIGeneratedCard> cards) {
+    state = state.copyWith(generatedCards: cards, clearError: true);
+  }
+
+  Future<AIGenerationJob?> startAIGenerationJob({
+    required String topic,
+    required String context,
+    required int cardCount,
+    required String difficulty,
+    GenerationPolicy? policy,
+  }) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再使用 AI 后台生成');
+      return null;
+    }
+    state = state.copyWith(syncInProgress: true, clearError: true);
+    try {
+      final Map<String, dynamic> response = await _apiClient
+          .startAIGenerationJob(
+            token: token,
+            topic: topic,
+            context: context,
+            cardCount: cardCount,
+            difficulty: difficulty,
+            policy: policy?.toJson(),
+          );
+      final AIGenerationJob job = AIGenerationJob.fromJson(response);
+      state = state.copyWith(
+        syncInProgress: false,
+        aiGenerationJobs: <AIGenerationJob>[
+          job,
+          ...state.aiGenerationJobs.where(
+            (AIGenerationJob item) => item.id != job.id,
+          ),
+        ],
+      );
+      return job;
+    } catch (error) {
+      state = state.copyWith(
+        syncInProgress: false,
+        errorMessage: '启动后台生成失败：$error',
+      );
+      return null;
+    }
+  }
+
+  Future<AIGenerationJob?> startAIGenerationJobFromFile({
+    required String filename,
+    required Uint8List bytes,
+    required String topic,
+    required int cardCount,
+    required String difficulty,
+    List<String> cardTypes = const <String>[
+      'basic',
+      'single_choice',
+      'multi_choice',
+      'cloze',
+    ],
+    GenerationPolicy? policy,
+  }) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再使用 AI 后台生成');
+      return null;
+    }
+    state = state.copyWith(syncInProgress: true, clearError: true);
+    try {
+      final Map<String, dynamic> response = await _apiClient
+          .startAIGenerationJobFromFile(
+            token: token,
+            filename: filename,
+            bytes: bytes,
+            topic: topic,
+            cardCount: cardCount,
+            difficulty: difficulty,
+            cardTypes: cardTypes,
+            policy: policy?.toJson(),
+          );
+      final AIGenerationJob job = AIGenerationJob.fromJson(response);
+      state = state.copyWith(
+        syncInProgress: false,
+        aiGenerationJobs: <AIGenerationJob>[
+          job,
+          ...state.aiGenerationJobs.where(
+            (AIGenerationJob item) => item.id != job.id,
+          ),
+        ],
+      );
+      return job;
+    } catch (error) {
+      final String message = error is DioException
+          ? _friendlyAIGenerationFileError(error)
+          : '启动文件后台生成失败：$error';
+      state = state.copyWith(syncInProgress: false, errorMessage: message);
+      return null;
+    }
+  }
+
+  Future<void> refreshAIGenerationJobs() async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      return;
+    }
+    try {
+      final List<Map<String, dynamic>> items = await _apiClient
+          .listAIGenerationJobs(token: token);
+      state = state.copyWith(
+        aiGenerationJobs: items.map(AIGenerationJob.fromJson).toList(),
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(errorMessage: '刷新后台任务失败：$error');
+    }
+  }
+
+  Future<AIGenerationJob?> refreshAIGenerationJob(String jobId) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      return null;
+    }
+    try {
+      final Map<String, dynamic> response = await _apiClient.getAIGenerationJob(
+        token: token,
+        jobId: jobId,
+      );
+      final AIGenerationJob job = AIGenerationJob.fromJson(response);
+      state = state.copyWith(
+        aiGenerationJobs: <AIGenerationJob>[
+          job,
+          ...state.aiGenerationJobs.where(
+            (AIGenerationJob item) => item.id != job.id,
+          ),
+        ],
+        clearError: true,
+      );
+      return job;
+    } catch (error) {
+      state = state.copyWith(errorMessage: '刷新后台任务失败：$error');
+      return null;
+    }
+  }
+
+  void applyAIGenerationJobResult(AIGenerationJob job) {
+    if (!job.hasResult) {
+      state = state.copyWith(errorMessage: '这个后台任务还没有可用结果');
+      return;
+    }
+    state = state.copyWith(
+      generatedCards: job.resultItems,
+      generatedDocument: job.document,
+      clearGeneratedDocument: job.document == null,
+      clearError: true,
+    );
   }
 
   Future<void> _saveSessionFromResponse(Map<String, dynamic> response) async {

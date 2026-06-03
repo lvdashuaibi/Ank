@@ -278,9 +278,11 @@ class ApiClient {
     final Map<String, dynamic> payload = <String, dynamic>{
       'topic': topic,
       'context': context,
-      'card_count': cardCount,
       'difficulty': difficulty,
     };
+    if (cardCount > 0) {
+      payload['card_count'] = cardCount;
+    }
     if (policy != null) {
       payload['policy'] = policy;
     }
@@ -305,18 +307,101 @@ class ApiClient {
     final FormData formData = FormData.fromMap(<String, dynamic>{
       'file': MultipartFile.fromBytes(bytes, filename: filename),
       'topic': topic,
-      'card_count': cardCount.toString(),
       'difficulty': difficulty,
       'card_types': cardTypes.join(','),
       'strategy': 'fsrs_friendly',
       if (policy != null) 'policy_json': jsonEncode(policy),
     });
+    if (cardCount > 0) {
+      formData.fields.add(
+        MapEntry<String, String>('card_count', cardCount.toString()),
+      );
+    }
     final Response<dynamic> response = await _dio.post<dynamic>(
       '/ai/import-file',
       data: formData,
       options: _aiOptions(token),
     );
     return _requireMap(response.data, '/ai/import-file');
+  }
+
+  Future<Map<String, dynamic>> startAIGenerationJob({
+    required String token,
+    required String topic,
+    required String context,
+    required int cardCount,
+    required String difficulty,
+    Map<String, dynamic>? policy,
+  }) async {
+    final Map<String, dynamic> payload = <String, dynamic>{
+      'topic': topic,
+      'context': context,
+      'difficulty': difficulty,
+    };
+    if (cardCount > 0) {
+      payload['card_count'] = cardCount;
+    }
+    if (policy != null) {
+      payload['policy'] = policy;
+    }
+    final Response<dynamic> response = await _dio.post<dynamic>(
+      '/ai/generate-jobs',
+      data: payload,
+      options: _aiOptions(token),
+    );
+    return _requireMap(response.data, '/ai/generate-jobs');
+  }
+
+  Future<Map<String, dynamic>> startAIGenerationJobFromFile({
+    required String token,
+    required String filename,
+    required List<int> bytes,
+    required String topic,
+    required int cardCount,
+    required String difficulty,
+    required List<String> cardTypes,
+    Map<String, dynamic>? policy,
+  }) async {
+    final FormData formData = FormData.fromMap(<String, dynamic>{
+      'file': MultipartFile.fromBytes(bytes, filename: filename),
+      'topic': topic,
+      'difficulty': difficulty,
+      'card_types': cardTypes.join(','),
+      'strategy': 'fsrs_friendly',
+      if (policy != null) 'policy_json': jsonEncode(policy),
+    });
+    if (cardCount > 0) {
+      formData.fields.add(
+        MapEntry<String, String>('card_count', cardCount.toString()),
+      );
+    }
+    final Response<dynamic> response = await _dio.post<dynamic>(
+      '/ai/import-file-job',
+      data: formData,
+      options: _aiOptions(token),
+    );
+    return _requireMap(response.data, '/ai/import-file-job');
+  }
+
+  Future<List<Map<String, dynamic>>> listAIGenerationJobs({
+    required String token,
+  }) async {
+    final Response<dynamic> response = await _dio.get<dynamic>(
+      '/ai/generate-jobs',
+      options: _aiOptions(token),
+    );
+    return _toMapList(response.data, 'items');
+  }
+
+  Future<Map<String, dynamic>> getAIGenerationJob({
+    required String token,
+    required String jobId,
+  }) async {
+    final Response<dynamic> response = await _dio.get<dynamic>(
+      '/ai/generate-jobs/$jobId',
+      options: _aiOptions(token),
+    );
+    return _requireMap(response.data, '/ai/generate-jobs/$jobId');
   }
 
   Future<List<Map<String, dynamic>>> rewriteCardWithAI({
@@ -349,17 +434,27 @@ class ApiClient {
     required String difficulty,
     required List<Map<String, String>> messages,
     required List<Map<String, dynamic>> items,
+    String? operation,
+    List<int> selectedIndexes = const <int>[],
     Map<String, dynamic>? reference,
     Map<String, dynamic>? policy,
   }) async {
     final Map<String, dynamic> payload = <String, dynamic>{
       'topic': topic,
       'instruction': instruction,
-      'card_count': cardCount,
       'difficulty': difficulty,
       'messages': messages,
       'items': items,
     };
+    if (cardCount > 0) {
+      payload['card_count'] = cardCount;
+    }
+    if (operation != null && operation.trim().isNotEmpty) {
+      payload['operation'] = operation;
+    }
+    if (selectedIndexes.isNotEmpty) {
+      payload['selected_indexes'] = selectedIndexes;
+    }
     if (reference != null) {
       payload['reference'] = reference;
     }
