@@ -9,3 +9,5 @@
 *.swp
 
 server/.codex_tmp/
+server/webapp/node_modules/
+server/webapp/tsconfig.tsbuildinfo

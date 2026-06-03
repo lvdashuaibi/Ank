@@ -18,7 +18,7 @@ import (
 	"github.com/ank/flashcard-server/internal/service"
 )
 
-//go:embed web/*
+//go:embed web/**
 var webAssets embed.FS
 
 type authRequest struct {
@@ -466,6 +466,9 @@ func registerWebConsole(router *gin.Engine) {
 	})
 	router.GET("/web/*filepath", func(c *gin.Context) {
 		http.StripPrefix("/web/", fileServer).ServeHTTP(c.Writer, c.Request)
+	})
+	router.GET("/assets/*filepath", func(c *gin.Context) {
+		http.StripPrefix("/", fileServer).ServeHTTP(c.Writer, c.Request)
 	})
 }
 
