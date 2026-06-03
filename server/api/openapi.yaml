@@ -609,6 +609,99 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/ai/policies:
+    get:
+      tags: [ai]
+      summary: List AI generation policies
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/GenerationPolicy"
+    post:
+      tags: [ai]
+      summary: Create an AI generation policy
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerationPolicy"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationPolicy"
+  /api/v1/ai/policies/{id}:
+    get:
+      tags: [ai]
+      summary: Get an AI generation policy
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationPolicy"
+    put:
+      tags: [ai]
+      summary: Update an AI generation policy
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerationPolicy"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerationPolicy"
+    delete:
+      tags: [ai]
+      summary: Delete an AI generation policy
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: No Content
   /api/v1/ai/generate:
     post:
       tags: [ai]
@@ -640,10 +733,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/ai/generate-job:
+    post:
+      tags: [ai]
+      summary: Create an AI generation job
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIGenerateRequest"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIGenerationJob"
+  /api/v1/ai/generate-job/{id}:
+    get:
+      tags: [ai]
+      summary: Get an AI generation job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIGenerationJob"
   /api/v1/ai/import-file:
     post:
       tags: [ai]
       summary: Generate flashcards from PDF, TXT, or Markdown files
+      description: Supports UTF-8 Markdown/TXT and text-based PDFs up to 50MB. Markdown image references are preserved as metadata and text placeholders, but image pixels are not OCR processed.
       security:
         - bearerAuth: []
       requestBody:
@@ -718,6 +850,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/ai/rewrite-batch:
+    post:
+      tags: [ai]
+      summary: Rewrite multiple flashcards with AI
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AIRewriteBatchRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AIRewriteBatchResponse"
 components:
   securitySchemes:
     bearerAuth:
@@ -1151,6 +1302,12 @@ components:
           type: string
         source_name:
           type: string
+        policy_id:
+          type: string
+        policy:
+          $ref: "#/components/schemas/GenerationPolicy"
+        batch_mode:
+          type: boolean
     AIGeneratedCard:
       type: object
       required: [title, content, front, back, tags, note]
@@ -1179,6 +1336,8 @@ components:
             type: string
         note:
           type: string
+        quality_report:
+          $ref: "#/components/schemas/AICardQualityReport"
     AIGenerateResponse:
       type: object
       required: [items]
@@ -1189,6 +1348,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AIGeneratedCard"
+        policy:
+          $ref: "#/components/schemas/GenerationPolicy"
+        warnings:
+          type: array
+          items:
+            type: string
+        job_id:
+          type: string
     AIDocumentSummary:
       type: object
       properties:
@@ -1202,6 +1369,98 @@ components:
           type: integer
         page_count:
           type: integer
+        chunk_count:
+          type: integer
+        image_count:
+          type: integer
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIImportedImage"
+    AIImportedImage:
+      type: object
+      properties:
+        alt:
+          type: string
+        source:
+          type: string
+        is_remote:
+          type: boolean
+    GenerationPolicy:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        subject:
+          type: string
+        audience:
+          type: string
+        atomicity_level:
+          type: string
+        answer_style:
+          type: string
+        max_answer_chars:
+          type: integer
+        preferred_card_types:
+          type: array
+          items:
+            type: string
+        allow_definition_cards:
+          type: boolean
+        allow_comparison_cards:
+          type: boolean
+        allow_example_cards:
+          type: boolean
+        allow_misconception_cards:
+          type: boolean
+        split_strategy:
+          type: string
+        coverage_mode:
+          type: string
+        max_cards_per_chunk:
+          type: integer
+        max_cards_total:
+          type: integer
+        require_source_excerpt:
+          type: boolean
+        require_source_location:
+          type: boolean
+        dedupe_level:
+          type: string
+        repair_mode:
+          type: string
+        custom_rules:
+          type: string
+    AICardQualityReport:
+      type: object
+      properties:
+        score:
+          type: number
+        badges:
+          type: array
+          items:
+            type: string
+        violations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIQualityViolation"
+        repairable:
+          type: boolean
+    AIQualityViolation:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        severity:
+          type: string
     AIRewriteCardRequest:
       type: object
       required: [title, content, rewrite_type]
@@ -1237,3 +1496,63 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AIRewriteCandidate"
+    AIRewriteBatchRequest:
+      type: object
+      properties:
+        rewrite_type:
+          type: string
+        instruction:
+          type: string
+        policy_id:
+          type: string
+        policy:
+          $ref: "#/components/schemas/GenerationPolicy"
+        cards:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIRewriteCardRequest"
+    AIRewriteBatchResult:
+      type: object
+      properties:
+        card_id:
+          type: string
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIRewriteCandidate"
+        error:
+          type: string
+    AIRewriteBatchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AIRewriteBatchResult"
+    AIGenerationJob:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        source_name:
+          type: string
+        source_type:
+          type: string
+        status:
+          type: string
+        progress:
+          type: number
+        error_message:
+          type: string
+        request:
+          $ref: "#/components/schemas/AIGenerateRequest"
+        result:
+          $ref: "#/components/schemas/AIGenerateResponse"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time

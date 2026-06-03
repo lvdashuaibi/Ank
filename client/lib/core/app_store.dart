@@ -278,6 +278,146 @@ class SyncOperation {
   }
 }
 
+class GenerationPolicy {
+  const GenerationPolicy({
+    required this.name,
+    this.id = '',
+    this.description = '',
+    this.subject = '',
+    this.audience = '',
+    this.atomicityLevel = 'strict',
+    this.answerStyle = 'one_sentence',
+    this.maxAnswerChars = 80,
+    this.preferredCardTypes = const <String>['basic', 'cloze'],
+    this.splitStrategy = 'by_heading',
+    this.coverageMode = 'balanced',
+    this.maxCardsPerChunk = 6,
+    this.maxCardsTotal = 20,
+    this.dedupeLevel = 'medium',
+    this.repairMode = 'violations_only',
+    this.customRules = '',
+  });
+
+  final String id;
+  final String name;
+  final String description;
+  final String subject;
+  final String audience;
+  final String atomicityLevel;
+  final String answerStyle;
+  final int maxAnswerChars;
+  final List<String> preferredCardTypes;
+  final String splitStrategy;
+  final String coverageMode;
+  final int maxCardsPerChunk;
+  final int maxCardsTotal;
+  final String dedupeLevel;
+  final String repairMode;
+  final String customRules;
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      if (id.isNotEmpty) 'id': id,
+      'name': name,
+      if (description.isNotEmpty) 'description': description,
+      if (subject.isNotEmpty) 'subject': subject,
+      if (audience.isNotEmpty) 'audience': audience,
+      'atomicity_level': atomicityLevel,
+      'answer_style': answerStyle,
+      'max_answer_chars': maxAnswerChars,
+      'preferred_card_types': preferredCardTypes,
+      'split_strategy': splitStrategy,
+      'coverage_mode': coverageMode,
+      'max_cards_per_chunk': maxCardsPerChunk,
+      'max_cards_total': maxCardsTotal,
+      'dedupe_level': dedupeLevel,
+      'repair_mode': repairMode,
+      if (customRules.isNotEmpty) 'custom_rules': customRules,
+    };
+  }
+
+  factory GenerationPolicy.fromJson(Map<String, dynamic> json) {
+    final List<String> preferredCardTypes =
+        ((json['preferred_card_types'] as List<dynamic>?) ?? <dynamic>[])
+            .map((dynamic item) => item.toString())
+            .where((String item) => item.trim().isNotEmpty)
+            .toList();
+    return GenerationPolicy(
+      id: (json['id'] ?? '') as String,
+      name: (json['name'] ?? '通用精读拆卡') as String,
+      description: (json['description'] ?? '') as String,
+      subject: (json['subject'] ?? '') as String,
+      audience: (json['audience'] ?? '') as String,
+      atomicityLevel: (json['atomicity_level'] ?? 'strict') as String,
+      answerStyle: (json['answer_style'] ?? 'one_sentence') as String,
+      maxAnswerChars: (json['max_answer_chars'] as num?)?.toInt() ?? 80,
+      preferredCardTypes: preferredCardTypes.isEmpty
+          ? const <String>['basic', 'cloze']
+          : preferredCardTypes,
+      splitStrategy: (json['split_strategy'] ?? 'by_heading') as String,
+      coverageMode: (json['coverage_mode'] ?? 'balanced') as String,
+      maxCardsPerChunk: (json['max_cards_per_chunk'] as num?)?.toInt() ?? 6,
+      maxCardsTotal: (json['max_cards_total'] as num?)?.toInt() ?? 20,
+      dedupeLevel: (json['dedupe_level'] ?? 'medium') as String,
+      repairMode: (json['repair_mode'] ?? 'violations_only') as String,
+      customRules: (json['custom_rules'] ?? '') as String,
+    );
+  }
+}
+
+class AIQualityViolation {
+  const AIQualityViolation({
+    required this.code,
+    required this.message,
+    required this.severity,
+  });
+
+  final String code;
+  final String message;
+  final String severity;
+
+  factory AIQualityViolation.fromJson(Map<String, dynamic> json) {
+    return AIQualityViolation(
+      code: (json['code'] ?? '') as String,
+      message: (json['message'] ?? '') as String,
+      severity: (json['severity'] ?? '') as String,
+    );
+  }
+}
+
+class AIQualityReport {
+  const AIQualityReport({
+    required this.score,
+    required this.badges,
+    required this.violations,
+    required this.repairable,
+  });
+
+  final double score;
+  final List<String> badges;
+  final List<AIQualityViolation> violations;
+  final bool repairable;
+
+  bool get hasViolations => violations.isNotEmpty;
+
+  factory AIQualityReport.fromJson(Map<String, dynamic> json) {
+    return AIQualityReport(
+      score: (json['score'] as num?)?.toDouble() ?? 0,
+      badges: ((json['badges'] as List<dynamic>?) ?? <dynamic>[])
+          .map((dynamic item) => item.toString())
+          .toList(),
+      violations: ((json['violations'] as List<dynamic>?) ?? <dynamic>[])
+          .whereType<Map>()
+          .map(
+            (Map item) =>
+                AIQualityViolation.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList(),
+      repairable: (json['repairable'] ?? false) as bool,
+    );
+  }
+}
+
 class AIGeneratedCard {
   const AIGeneratedCard({
     required this.title,
@@ -289,6 +429,7 @@ class AIGeneratedCard {
     this.sourceExcerpt = '',
     this.sourceLocation = '',
     this.difficulty = '',
+    this.qualityReport,
   });
 
   final String title;
@@ -300,6 +441,24 @@ class AIGeneratedCard {
   final String sourceExcerpt;
   final String sourceLocation;
   final String difficulty;
+  final AIQualityReport? qualityReport;
+
+  AIGeneratedCard applyRewrite(AIRewriteCandidate candidate) {
+    final String nextContent = candidate.content.trim().isEmpty
+        ? content
+        : candidate.content;
+    return AIGeneratedCard(
+      title: candidate.title.trim().isEmpty ? title : candidate.title.trim(),
+      content: nextContent,
+      tags: tags,
+      note: note,
+      cardType: cardType,
+      knowledgePoint: knowledgePoint,
+      sourceExcerpt: sourceExcerpt,
+      sourceLocation: sourceLocation,
+      difficulty: difficulty,
+    );
+  }
 
   factory AIGeneratedCard.fromJson(Map<String, dynamic> json) {
     final String content = (json['content'] ?? '') as String;
@@ -323,6 +482,47 @@ class AIGeneratedCard {
       sourceExcerpt: (json['source_excerpt'] ?? '') as String,
       sourceLocation: (json['source_location'] ?? '') as String,
       difficulty: (json['difficulty'] ?? '') as String,
+      qualityReport: json['quality_report'] is Map
+          ? AIQualityReport.fromJson(
+              Map<String, dynamic>.from(json['quality_report'] as Map),
+            )
+          : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'title': title,
+      'content': content,
+      'tags': tags,
+      'note': note,
+      'card_type': cardType,
+      'knowledge_point': knowledgePoint,
+      'source_excerpt': sourceExcerpt,
+      'source_location': sourceLocation,
+      'difficulty': difficulty,
+    };
+  }
+}
+
+class AICardChatResponse {
+  const AICardChatResponse({
+    required this.assistantMessage,
+    required this.items,
+    this.updatedIndex,
+  });
+
+  final String assistantMessage;
+  final List<AIGeneratedCard> items;
+  final int? updatedIndex;
+
+  factory AICardChatResponse.fromJson(Map<String, dynamic> json) {
+    return AICardChatResponse(
+      assistantMessage: (json['assistant_message'] ?? '') as String,
+      items: _coerceMapList(
+        json['items'],
+      ).map(AIGeneratedCard.fromJson).toList(),
+      updatedIndex: (json['updated_index'] as num?)?.toInt(),
     );
   }
 }
@@ -334,6 +534,9 @@ class AIDocumentSummary {
     required this.textPreview,
     required this.textLength,
     this.pageCount = 0,
+    this.chunkCount = 0,
+    this.imageCount = 0,
+    this.images = const <AIImportedImage>[],
   });
 
   final String title;
@@ -341,6 +544,9 @@ class AIDocumentSummary {
   final String textPreview;
   final int textLength;
   final int pageCount;
+  final int chunkCount;
+  final int imageCount;
+  final List<AIImportedImage> images;
 
   factory AIDocumentSummary.fromJson(Map<String, dynamic> json) {
     return AIDocumentSummary(
@@ -349,6 +555,35 @@ class AIDocumentSummary {
       textPreview: (json['text_preview'] ?? '') as String,
       textLength: (json['text_length'] as num?)?.toInt() ?? 0,
       pageCount: (json['page_count'] as num?)?.toInt() ?? 0,
+      chunkCount: (json['chunk_count'] as num?)?.toInt() ?? 0,
+      imageCount: (json['image_count'] as num?)?.toInt() ?? 0,
+      images: ((json['images'] as List<dynamic>?) ?? <dynamic>[])
+          .whereType<Map>()
+          .map(
+            (Map item) =>
+                AIImportedImage.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList(),
+    );
+  }
+}
+
+class AIImportedImage {
+  const AIImportedImage({
+    required this.source,
+    this.alt = '',
+    this.isRemote = false,
+  });
+
+  final String alt;
+  final String source;
+  final bool isRemote;
+
+  factory AIImportedImage.fromJson(Map<String, dynamic> json) {
+    return AIImportedImage(
+      alt: (json['alt'] ?? '') as String,
+      source: (json['source'] ?? '') as String,
+      isRemote: (json['is_remote'] ?? false) as bool,
     );
   }
 }
@@ -2071,6 +2306,7 @@ class AppStore extends StateNotifier<AppState> {
     required String context,
     required int cardCount,
     required String difficulty,
+    GenerationPolicy? policy,
   }) async {
     final String? token = state.accessToken;
     if (token == null || token.isEmpty) {
@@ -2078,7 +2314,11 @@ class AppStore extends StateNotifier<AppState> {
       return;
     }
 
-    state = state.copyWith(syncInProgress: true, clearError: true);
+    state = state.copyWith(
+      syncInProgress: true,
+      clearError: true,
+      clearGeneratedDocument: true,
+    );
     try {
       final List<Map<String, dynamic>> items = await _apiClient.generateCards(
         token: token,
@@ -2086,10 +2326,12 @@ class AppStore extends StateNotifier<AppState> {
         context: context,
         cardCount: cardCount,
         difficulty: difficulty,
+        policy: policy?.toJson(),
       );
       state = state.copyWith(
         syncInProgress: false,
         generatedCards: items.map(AIGeneratedCard.fromJson).toList(),
+        clearGeneratedDocument: true,
       );
     } catch (error) {
       state = state.copyWith(
@@ -2111,6 +2353,7 @@ class AppStore extends StateNotifier<AppState> {
       'multi_choice',
       'cloze',
     ],
+    GenerationPolicy? policy,
   }) async {
     final String? token = state.accessToken;
     if (token == null || token.isEmpty) {
@@ -2129,6 +2372,7 @@ class AppStore extends StateNotifier<AppState> {
             cardCount: cardCount,
             difficulty: difficulty,
             cardTypes: cardTypes,
+            policy: policy?.toJson(),
           );
       final List<Map<String, dynamic>> items = _coerceMapList(
         response['items'],
@@ -2140,10 +2384,10 @@ class AppStore extends StateNotifier<AppState> {
         generatedCards: items.map(AIGeneratedCard.fromJson).toList(),
       );
     } catch (error) {
-      state = state.copyWith(
-        syncInProgress: false,
-        errorMessage: 'AI 文件生成失败：$error',
-      );
+      final String message = error is DioException
+          ? _friendlyAIGenerationFileError(error)
+          : 'AI 文件生成失败：$error';
+      state = state.copyWith(syncInProgress: false, errorMessage: message);
     }
   }
 
@@ -2192,11 +2436,69 @@ class AppStore extends StateNotifier<AppState> {
     }
   }
 
+  Future<AICardChatResponse?> chatWithGeneratedCards({
+    required String topic,
+    required String instruction,
+    required int cardCount,
+    required String difficulty,
+    required List<Map<String, String>> messages,
+    Map<String, dynamic>? reference,
+    GenerationPolicy? policy,
+  }) async {
+    final String? token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      state = state.copyWith(errorMessage: '请先登录后再使用 AI 对话制卡');
+      return null;
+    }
+    state = state.copyWith(syncInProgress: true, clearError: true);
+    try {
+      final Map<String, dynamic> response = await _apiClient.chatWithAICards(
+        token: token,
+        topic: topic,
+        instruction: instruction,
+        cardCount: cardCount,
+        difficulty: difficulty,
+        messages: messages,
+        items: state.generatedCards
+            .map((AIGeneratedCard item) => item.toJson())
+            .toList(),
+        reference: reference,
+        policy: policy?.toJson(),
+      );
+      final AICardChatResponse chatResponse = AICardChatResponse.fromJson(
+        response,
+      );
+      state = state.copyWith(
+        syncInProgress: false,
+        generatedCards: chatResponse.items,
+        clearError: true,
+      );
+      return chatResponse;
+    } catch (error) {
+      state = state.copyWith(
+        syncInProgress: false,
+        errorMessage: 'AI 对话制卡失败：$error',
+      );
+      return null;
+    }
+  }
+
   void clearGeneratedCards() {
     state = state.copyWith(
       generatedCards: <AIGeneratedCard>[],
       clearGeneratedDocument: true,
     );
+  }
+
+  void replaceGeneratedCard(int index, AIGeneratedCard card) {
+    if (index < 0 || index >= state.generatedCards.length) {
+      return;
+    }
+    final List<AIGeneratedCard> next = <AIGeneratedCard>[
+      ...state.generatedCards,
+    ];
+    next[index] = card;
+    state = state.copyWith(generatedCards: next, clearError: true);
   }
 
   Future<void> _saveSessionFromResponse(Map<String, dynamic> response) async {
@@ -2314,6 +2616,39 @@ class AppStore extends StateNotifier<AppState> {
       return '$action失败：无法连接服务端，请确认本地后端已启动。';
     }
     return '$action失败，请稍后重试';
+  }
+
+  String _friendlyAIGenerationFileError(DioException error) {
+    final dynamic data = error.response?.data;
+    final String serverMessage = data is Map
+        ? (data['error'] ?? '').toString()
+        : '';
+    if (serverMessage.contains('too large')) {
+      return 'AI 文件生成失败：文件超过 50MB，请先拆成章节或压缩后再导入。';
+    }
+    if (serverMessage.contains('scanned') ||
+        serverMessage.contains('OCR') ||
+        serverMessage.contains('selectable text')) {
+      return 'AI 文件生成失败：这个 PDF 没有可复制文本，请先 OCR 或导出为 Markdown/TXT。';
+    }
+    if (serverMessage.contains('unsupported')) {
+      return 'AI 文件生成失败：暂支持 PDF、Markdown 和 TXT 文件。';
+    }
+    if (serverMessage.contains('UTF-8')) {
+      return 'AI 文件生成失败：文本文件需要 UTF-8 编码。';
+    }
+    if (serverMessage.isNotEmpty) {
+      return 'AI 文件生成失败：$serverMessage';
+    }
+    if (error.type == DioExceptionType.receiveTimeout) {
+      return 'AI 文件生成失败：文档较大，生成耗时超过当前等待时间。请先按章节拆分后重试。';
+    }
+    if (error.type == DioExceptionType.connectionError ||
+        error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.sendTimeout) {
+      return 'AI 文件生成失败：无法连接服务端，请确认本地后端已启动。';
+    }
+    return 'AI 文件生成失败，请稍后重试';
   }
 
   bool _shouldQueueOffline(DioException error) {

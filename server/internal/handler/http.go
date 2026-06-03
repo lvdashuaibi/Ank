@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"embed"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +17,9 @@ import (
 	"github.com/ank/flashcard-server/internal/repository"
 	"github.com/ank/flashcard-server/internal/service"
 )
+
+//go:embed web/*
+var webAssets embed.FS
 
 type authRequest struct {
 	Email       string `json:"email"`
@@ -33,6 +38,8 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(logger))
+
+	registerWebConsole(router)
 
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "port": cfg.Port})
@@ -238,13 +245,86 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 	protected.GET("/sync/pull", func(c *gin.Context) {
 		writeJSON(c, http.StatusOK, services.SyncPull(userIDFromContext(c)))
 	})
+	protected.GET("/ai/policies", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"items": services.ListGenerationPolicies(userIDFromContext(c))})
+	})
+	protected.POST("/ai/policies", func(c *gin.Context) {
+		var request model.GenerationPolicy
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		policy, err := services.CreateGenerationPolicy(userIDFromContext(c), request)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusCreated, policy)
+	})
+	protected.GET("/ai/policies/:id", func(c *gin.Context) {
+		policy, err := services.GetGenerationPolicy(userIDFromContext(c), c.Param("id"))
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, policy)
+	})
+	protected.PUT("/ai/policies/:id", func(c *gin.Context) {
+		var request model.GenerationPolicy
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		policy, err := services.UpdateGenerationPolicy(userIDFromContext(c), c.Param("id"), request)
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, policy)
+	})
+	protected.DELETE("/ai/policies/:id", func(c *gin.Context) {
+		if err := services.DeleteGenerationPolicy(userIDFromContext(c), c.Param("id")); err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
 	protected.POST("/ai/generate", func(c *gin.Context) {
 		var request model.AIGenerateRequest
 		if err := c.ShouldBindJSON(&request); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if err := resolveGenerationPolicy(c, services, &request); err != nil {
+			writeRepoError(c, err)
+			return
+		}
 		c.JSON(http.StatusOK, services.GenerateCards(request))
+	})
+	protected.POST("/ai/generate-job", func(c *gin.Context) {
+		var request model.AIGenerateRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := resolveGenerationPolicy(c, services, &request); err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		job, err := services.CreateAIGenerationJob(userIDFromContext(c), request)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, job)
+	})
+	protected.GET("/ai/generate-job/:id", func(c *gin.Context) {
+		job, err := services.GetAIGenerationJob(userIDFromContext(c), c.Param("id"))
+		if err != nil {
+			writeRepoError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, job)
 	})
 	protected.POST("/ai/import-file", func(c *gin.Context) {
 		file, err := c.FormFile("file")
@@ -259,6 +339,19 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 			Difficulty: c.PostForm("difficulty"),
 			Strategy:   c.PostForm("strategy"),
 			CardTypes:  splitCSV(c.PostForm("card_types")),
+			PolicyID:   c.PostForm("policy_id"),
+		}
+		if rawPolicy := strings.TrimSpace(c.PostForm("policy_json")); rawPolicy != "" {
+			var policy model.GenerationPolicy
+			if err := json.Unmarshal([]byte(rawPolicy), &policy); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid policy_json"})
+				return
+			}
+			request.Policy = &policy
+		}
+		if err := resolveGenerationPolicy(c, services, &request); err != nil {
+			writeRepoError(c, err)
+			return
 		}
 		response, err := services.GenerateCardsFromUpload(request, file)
 		if err != nil {
@@ -275,8 +368,55 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 		}
 		c.JSON(http.StatusOK, services.RewriteCardWithAI(request))
 	})
+	protected.POST("/ai/rewrite-batch", func(c *gin.Context) {
+		var request model.AIRewriteBatchRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, services.RewriteCardsWithAI(request))
+	})
+	protected.POST("/ai/chat-cards", func(c *gin.Context) {
+		var request model.AICardChatRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, services.ChatCardsWithAI(request))
+	})
 
 	return router
+}
+
+func registerWebConsole(router *gin.Engine) {
+	assets, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		panic(err)
+	}
+	fileServer := http.FileServer(http.FS(assets))
+	router.GET("/", func(c *gin.Context) {
+		index, readErr := fs.ReadFile(webAssets, "web/index.html")
+		if readErr != nil {
+			c.String(http.StatusInternalServerError, "web console unavailable")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", index)
+	})
+	router.GET("/web/*filepath", func(c *gin.Context) {
+		http.StripPrefix("/web/", fileServer).ServeHTTP(c.Writer, c.Request)
+	})
+}
+
+func resolveGenerationPolicy(c *gin.Context, services *service.AppService, request *model.AIGenerateRequest) error {
+	if request == nil || request.Policy != nil || strings.TrimSpace(request.PolicyID) == "" {
+		return nil
+	}
+	policy, err := services.GetGenerationPolicy(userIDFromContext(c), request.PolicyID)
+	if err != nil {
+		return err
+	}
+	request.Policy = &policy
+	return nil
 }
 
 func splitCSV(value string) []string {

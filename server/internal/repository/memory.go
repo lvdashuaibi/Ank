@@ -19,6 +19,8 @@ type MemoryStore struct {
 	folders    map[string]model.Folder
 	decks      map[string]model.Deck
 	cards      map[string]model.Card
+	policies   map[string]model.GenerationPolicy
+	aiJobs     map[string]model.AIGenerationJob
 	reviewLogs []model.ReviewLog
 }
 
@@ -28,6 +30,8 @@ func NewMemoryStore() *MemoryStore {
 		folders:    make(map[string]model.Folder),
 		decks:      make(map[string]model.Deck),
 		cards:      make(map[string]model.Card),
+		policies:   make(map[string]model.GenerationPolicy),
+		aiJobs:     make(map[string]model.AIGenerationJob),
 		reviewLogs: make([]model.ReviewLog, 0),
 	}
 }
@@ -272,6 +276,88 @@ func (s *MemoryStore) AppendReviewLog(log model.ReviewLog) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reviewLogs = append(s.reviewLogs, log)
+	return nil
+}
+
+func (s *MemoryStore) ListGenerationPolicies(userID string) []model.GenerationPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	policies := make([]model.GenerationPolicy, 0)
+	for _, policy := range s.policies {
+		if policy.UserID == userID {
+			policies = append(policies, policy)
+		}
+	}
+	sort.Slice(policies, func(i, j int) bool {
+		return policies[i].CreatedAt.Before(policies[j].CreatedAt)
+	})
+	return policies
+}
+
+func (s *MemoryStore) CreateGenerationPolicy(policy model.GenerationPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policies[policy.ID] = policy
+	return nil
+}
+
+func (s *MemoryStore) GetGenerationPolicy(userID, policyID string) (model.GenerationPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	policy, ok := s.policies[policyID]
+	if !ok || policy.UserID != userID {
+		return model.GenerationPolicy{}, ErrNotFound
+	}
+	return policy, nil
+}
+
+func (s *MemoryStore) UpdateGenerationPolicy(policy model.GenerationPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.policies[policy.ID]
+	if !ok || current.UserID != policy.UserID {
+		return ErrNotFound
+	}
+	s.policies[policy.ID] = policy
+	return nil
+}
+
+func (s *MemoryStore) DeleteGenerationPolicy(userID, policyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	policy, ok := s.policies[policyID]
+	if !ok || policy.UserID != userID {
+		return ErrNotFound
+	}
+	delete(s.policies, policyID)
+	return nil
+}
+
+func (s *MemoryStore) CreateAIGenerationJob(job model.AIGenerationJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.aiJobs[job.ID] = job
+	return nil
+}
+
+func (s *MemoryStore) GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	job, ok := s.aiJobs[jobID]
+	if !ok || job.UserID != userID {
+		return model.AIGenerationJob{}, ErrNotFound
+	}
+	return job, nil
+}
+
+func (s *MemoryStore) UpdateAIGenerationJob(job model.AIGenerationJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.aiJobs[job.ID]
+	if !ok || current.UserID != job.UserID {
+		return ErrNotFound
+	}
+	s.aiJobs[job.ID] = job
 	return nil
 }
 

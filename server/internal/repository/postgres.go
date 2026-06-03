@@ -380,6 +380,118 @@ func (s *PostgresStore) AppendReviewLog(log model.ReviewLog) error {
 	return err
 }
 
+func (s *PostgresStore) ListGenerationPolicies(userID string) []model.GenerationPolicy {
+	rows, err := s.db.Query(
+		`SELECT policy_json FROM ai_generation_policies WHERE user_id = $1 ORDER BY created_at`,
+		userID,
+	)
+	if err != nil {
+		return []model.GenerationPolicy{}
+	}
+	defer rows.Close()
+
+	policies := make([]model.GenerationPolicy, 0)
+	for rows.Next() {
+		if policy, err := scanGenerationPolicy(rows); err == nil {
+			policies = append(policies, policy)
+		}
+	}
+	return policies
+}
+
+func (s *PostgresStore) CreateGenerationPolicy(policy model.GenerationPolicy) error {
+	_, err := s.db.Exec(
+		`INSERT INTO ai_generation_policies (id, user_id, name, policy_json, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		policy.ID, policy.UserID, policy.Name, mustJSON(policy), policy.CreatedAt, policy.UpdatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) GetGenerationPolicy(userID, policyID string) (model.GenerationPolicy, error) {
+	row := s.db.QueryRow(
+		`SELECT policy_json FROM ai_generation_policies WHERE id = $1 AND user_id = $2`,
+		policyID, userID,
+	)
+	policy, err := scanGenerationPolicy(row)
+	if err == sql.ErrNoRows {
+		return model.GenerationPolicy{}, ErrNotFound
+	}
+	return policy, err
+}
+
+func (s *PostgresStore) UpdateGenerationPolicy(policy model.GenerationPolicy) error {
+	result, err := s.db.Exec(
+		`UPDATE ai_generation_policies
+		 SET name = $1, policy_json = $2, updated_at = $3
+		 WHERE id = $4 AND user_id = $5`,
+		policy.Name, mustJSON(policy), policy.UpdatedAt, policy.ID, policy.UserID,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteGenerationPolicy(userID, policyID string) error {
+	result, err := s.db.Exec(
+		`DELETE FROM ai_generation_policies WHERE id = $1 AND user_id = $2`,
+		policyID, userID,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) CreateAIGenerationJob(job model.AIGenerationJob) error {
+	_, err := s.db.Exec(
+		`INSERT INTO ai_generation_jobs (id, user_id, source_name, source_type, status, progress, error_message, request_json, result_json, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		job.ID, job.UserID, job.SourceName, job.SourceType, job.Status, job.Progress, job.ErrorMessage,
+		mustJSON(job.Request), mustJSON(job.Result), job.CreatedAt, job.UpdatedAt,
+	)
+	return err
+}
+
+func (s *PostgresStore) GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error) {
+	row := s.db.QueryRow(
+		`SELECT id, user_id, source_name, source_type, status, progress, error_message, request_json, result_json, created_at, updated_at
+		 FROM ai_generation_jobs WHERE id = $1 AND user_id = $2`,
+		jobID, userID,
+	)
+	job, err := scanAIGenerationJob(row)
+	if err == sql.ErrNoRows {
+		return model.AIGenerationJob{}, ErrNotFound
+	}
+	return job, err
+}
+
+func (s *PostgresStore) UpdateAIGenerationJob(job model.AIGenerationJob) error {
+	result, err := s.db.Exec(
+		`UPDATE ai_generation_jobs
+		 SET status = $1, progress = $2, error_message = $3, result_json = $4, updated_at = $5
+		 WHERE id = $6 AND user_id = $7`,
+		job.Status, job.Progress, job.ErrorMessage, mustJSON(job.Result), job.UpdatedAt, job.ID, job.UserID,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	schema := `
 CREATE TABLE IF NOT EXISTS users (
@@ -436,16 +548,37 @@ CREATE TABLE IF NOT EXISTS cards (
   elapsed_days DOUBLE PRECISION NOT NULL,
   scheduled_days DOUBLE PRECISION NOT NULL
 );
-CREATE TABLE IF NOT EXISTS review_logs (
-  id TEXT PRIMARY KEY,
-  card_id TEXT NOT NULL,
+	CREATE TABLE IF NOT EXISTS review_logs (
+	  id TEXT PRIMARY KEY,
+	  card_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   rating INT NOT NULL,
   reviewed_at TIMESTAMPTZ NOT NULL,
-  duration_ms INT NOT NULL,
-  state_before INT NOT NULL,
-  state_after INT NOT NULL
-);`
+	  duration_ms INT NOT NULL,
+	  state_before INT NOT NULL,
+	  state_after INT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS ai_generation_policies (
+	  id TEXT PRIMARY KEY,
+	  user_id TEXT NOT NULL,
+	  name TEXT NOT NULL,
+	  policy_json JSONB NOT NULL,
+	  created_at TIMESTAMPTZ NOT NULL,
+	  updated_at TIMESTAMPTZ NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS ai_generation_jobs (
+	  id TEXT PRIMARY KEY,
+	  user_id TEXT NOT NULL,
+	  source_name TEXT NOT NULL DEFAULT '',
+	  source_type TEXT NOT NULL DEFAULT '',
+	  status TEXT NOT NULL,
+	  progress DOUBLE PRECISION NOT NULL,
+	  error_message TEXT NOT NULL DEFAULT '',
+	  request_json JSONB NOT NULL,
+	  result_json JSONB,
+	  created_at TIMESTAMPTZ NOT NULL,
+	  updated_at TIMESTAMPTZ NOT NULL
+	);`
 	_, err := s.db.ExecContext(ctx, schema)
 	if err != nil {
 		return err
@@ -486,6 +619,8 @@ CREATE TABLE IF NOT EXISTS review_logs (
 		`CREATE INDEX IF NOT EXISTS idx_cards_user_due_date ON cards(user_id, due_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_cards_user_client_id ON cards(user_id, client_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_review_logs_user_card_id ON review_logs(user_id, card_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_generation_policies_user_id ON ai_generation_policies(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_generation_jobs_user_id ON ai_generation_jobs(user_id)`,
 	}
 	for _, stmt := range indexes {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -532,6 +667,40 @@ func scanDeck(scanner rowScanner) (model.Deck, error) {
 		return model.Deck{}, err
 	}
 	return deck, nil
+}
+
+func scanGenerationPolicy(scanner rowScanner) (model.GenerationPolicy, error) {
+	var raw []byte
+	if err := scanner.Scan(&raw); err != nil {
+		return model.GenerationPolicy{}, err
+	}
+	var policy model.GenerationPolicy
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		return model.GenerationPolicy{}, err
+	}
+	return policy, nil
+}
+
+func scanAIGenerationJob(scanner rowScanner) (model.AIGenerationJob, error) {
+	var job model.AIGenerationJob
+	var requestRaw []byte
+	var resultRaw []byte
+	err := scanner.Scan(
+		&job.ID, &job.UserID, &job.SourceName, &job.SourceType, &job.Status,
+		&job.Progress, &job.ErrorMessage, &requestRaw, &resultRaw,
+		&job.CreatedAt, &job.UpdatedAt,
+	)
+	if err != nil {
+		return model.AIGenerationJob{}, err
+	}
+	_ = json.Unmarshal(requestRaw, &job.Request)
+	if len(resultRaw) > 0 && string(resultRaw) != "null" {
+		var result model.AIGenerateResponse
+		if err := json.Unmarshal(resultRaw, &result); err == nil {
+			job.Result = &result
+		}
+	}
+	return job, nil
 }
 
 func mustJSON(value any) []byte {

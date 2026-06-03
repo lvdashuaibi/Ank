@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import '../card_dsl/dsl_view.dart';
 import '../layout/responsive_layout.dart';
+import '../theme/app_design.dart';
 import '../../core/app_store.dart';
 import '../../core/card_document.dart';
 import 'document_codec.dart';
@@ -82,12 +83,13 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
       appBar: AppBar(
         title: Text(widget.cardId == null ? '创建卡片' : '编辑卡片'),
         actions: <Widget>[
-          if (widget.cardId != null)
-            IconButton(
-              onPressed: state.syncInProgress ? null : _openAIRewriteSheet,
-              icon: const Icon(Icons.auto_fix_high_outlined),
-              tooltip: 'AI 优化卡片',
-            ),
+          IconButton(
+            onPressed: state.syncInProgress || !hasContent
+                ? null
+                : _openAIRewriteSheet,
+            icon: const Icon(Icons.auto_fix_high_outlined),
+            tooltip: widget.cardId == null ? 'AI 优化当前草稿' : 'AI 优化卡片',
+          ),
         ],
       ),
       body: SafeArea(
@@ -151,52 +153,35 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
             final double horizontalPadding = AppResponsive.horizontalPadding(
               constraints.maxWidth,
             );
-            final Widget previewButton = OutlinedButton.icon(
-              onPressed: _openPreviewSheet,
-              icon: const Icon(Icons.visibility_outlined),
-              label: const Text('预览'),
-            );
-            final Widget saveButton = FilledButton.icon(
-              onPressed: canSave ? _saveCard : null,
-              icon: state.syncInProgress
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(widget.cardId == null ? Icons.add : Icons.check),
-              label: Text(widget.cardId == null ? '创建卡片' : '保存修改'),
-            );
-            final bool stackActions = constraints.maxWidth < 320;
 
-            return Padding(
-              padding: EdgeInsets.fromLTRB(
-                horizontalPadding,
-                8,
-                horizontalPadding,
-                16,
+            return DecoratedBox(
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerLowest,
+                border: Border(
+                  top: BorderSide(color: theme.colorScheme.outlineVariant),
+                ),
               ),
-              child: Center(
-                heightFactor: 1,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 920),
-                  child: stackActions
-                      ? Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            previewButton,
-                            const SizedBox(height: 12),
-                            saveButton,
-                          ],
-                        )
-                      : Row(
-                          children: <Widget>[
-                            Expanded(child: previewButton),
-                            const SizedBox(width: 12),
-                            Expanded(child: saveButton),
-                          ],
-                        ),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  horizontalPadding,
+                  10,
+                  horizontalPadding,
+                  14,
+                ),
+                child: Center(
+                  heightFactor: 1,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 920),
+                    child: _EditorCommandBar(
+                      canSave: canSave,
+                      hasContent: hasContent,
+                      saving: state.syncInProgress,
+                      isCreating: widget.cardId == null,
+                      onPreview: _openPreviewSheet,
+                      onAIRewrite: _openAIRewriteSheet,
+                      onSave: _saveCard,
+                    ),
+                  ),
                 ),
               ),
             );
@@ -222,8 +207,8 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
 
     return Container(
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(24),
+        color: theme.colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(AppDesign.radiusLg),
         border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
       child: Column(
@@ -243,7 +228,7 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
           Divider(height: 1, color: theme.colorScheme.outlineVariant),
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+              padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
@@ -557,10 +542,16 @@ class _BlockCardEditorScreenState extends ConsumerState<BlockCardEditorScreen> {
 
   Future<void> _openAIRewriteSheet() async {
     final _CurrentEditorContent current = _currentEditorContent();
+    if (current.content.trim().isEmpty) {
+      _focusFirstTextNode();
+      return;
+    }
     final AIRewriteCandidate? candidate =
         await showModalBottomSheet<AIRewriteCandidate>(
           context: context,
+          backgroundColor: Colors.transparent,
           isScrollControlled: true,
+          useSafeArea: true,
           builder: (BuildContext context) {
             return _AIRewriteCardSheet(
               cardId: widget.cardId,
@@ -1634,6 +1625,39 @@ class _AIRewriteCardSheetState extends ConsumerState<_AIRewriteCardSheet> {
   String _rewriteType = 'improve';
   List<AIRewriteCandidate> _candidates = const <AIRewriteCandidate>[];
 
+  static const List<_AIRewriteOption> _options = <_AIRewriteOption>[
+    _AIRewriteOption(
+      value: 'improve',
+      icon: Icons.tune_rounded,
+      label: '优化表达',
+      description: '更聚焦、更可自评',
+    ),
+    _AIRewriteOption(
+      value: 'simplify_answer',
+      icon: Icons.compress_rounded,
+      label: '简化答案',
+      description: '减少单次记忆负担',
+    ),
+    _AIRewriteOption(
+      value: 'make_cloze',
+      icon: Icons.hide_source_outlined,
+      label: '改填空',
+      description: '遮住关键术语',
+    ),
+    _AIRewriteOption(
+      value: 'make_choice',
+      icon: Icons.radio_button_checked_outlined,
+      label: '改单选',
+      description: '生成选择题草稿',
+    ),
+    _AIRewriteOption(
+      value: 'split',
+      icon: Icons.call_split_rounded,
+      label: '拆原子卡',
+      description: '把大题拆小',
+    ),
+  ];
+
   @override
   void dispose() {
     _instructionController.dispose();
@@ -1644,137 +1668,154 @@ class _AIRewriteCardSheetState extends ConsumerState<_AIRewriteCardSheet> {
   Widget build(BuildContext context) {
     final AppState state = ref.watch(appStoreProvider);
     final ThemeData theme = Theme.of(context);
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.only(
-          left: 16,
-          right: 16,
-          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-          top: 16,
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      'AI 优化卡片',
-                      style: theme.textTheme.headlineSmall,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: state.syncInProgress
-                        ? null
-                        : () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close),
-                    tooltip: '关闭',
-                  ),
-                ],
+    final double maxHeight = MediaQuery.sizeOf(context).height * 0.86;
+    final CardDocumentParts currentParts = CardDocumentCodec.parse(
+      widget.content,
+    );
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 820, maxHeight: maxHeight),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerLowest,
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(AppDesign.radiusXl),
+            ),
+            border: Border.all(color: theme.colorScheme.outlineVariant),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 28,
+                offset: const Offset(0, -8),
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: _rewriteType,
-                decoration: const InputDecoration(labelText: '优化方式'),
-                items: const <DropdownMenuItem<String>>[
-                  DropdownMenuItem<String>(
-                    value: 'improve',
-                    child: Text('优化表达'),
-                  ),
-                  DropdownMenuItem<String>(
-                    value: 'simplify_answer',
-                    child: Text('简化答案'),
-                  ),
-                  DropdownMenuItem<String>(
-                    value: 'make_cloze',
-                    child: Text('改成填空题'),
-                  ),
-                  DropdownMenuItem<String>(
-                    value: 'make_choice',
-                    child: Text('改成选择题'),
-                  ),
-                  DropdownMenuItem<String>(
-                    value: 'split',
-                    child: Text('拆成原子卡建议'),
-                  ),
-                ],
-                onChanged: state.syncInProgress
-                    ? null
-                    : (String? value) {
-                        if (value == null) return;
-                        setState(() => _rewriteType = value);
-                      },
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _instructionController,
-                minLines: 2,
-                maxLines: 4,
-                decoration: const InputDecoration(
-                  labelText: '补充要求（可选）',
-                  hintText: '例如：更适合考试，或把答案压到一句话。',
-                ),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: state.syncInProgress ? null : _rewrite,
-                icon: state.syncInProgress
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.auto_fix_high_outlined),
-                label: Text(state.syncInProgress ? '优化中…' : '生成优化方案'),
-              ),
-              if (state.errorMessage != null) ...<Widget>[
-                const SizedBox(height: 12),
-                Text(
-                  state.errorMessage!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.error,
-                  ),
-                ),
-              ],
-              for (final AIRewriteCandidate candidate
-                  in _candidates) ...<Widget>[
-                const SizedBox(height: 12),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(
-                          candidate.title.isEmpty ? '优化候选' : candidate.title,
-                          style: theme.textTheme.titleSmall,
-                        ),
-                        if (candidate.changeSummary.isNotEmpty) ...<Widget>[
-                          const SizedBox(height: 6),
-                          Text(
-                            candidate.changeSummary,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 10),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: FilledButton(
-                            onPressed: () =>
-                                Navigator.of(context).pop(candidate),
-                            child: const Text('应用这个版本'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
             ],
+          ),
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 18,
+              right: 18,
+              bottom: MediaQuery.of(context).viewInsets.bottom + 18,
+              top: 10,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.outlineVariant,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              'AI 优化卡片',
+                              style: theme.textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '先生成候选，再确认应用到当前编辑内容。',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: state.syncInProgress
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded),
+                        tooltip: '关闭',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _ReadonlySnippet(
+                    title: '当前卡片',
+                    content: currentParts.prompt,
+                    secondary: currentParts.answer,
+                  ),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: <Widget>[
+                      for (final _AIRewriteOption option in _options)
+                        _AIRewriteOptionButton(
+                          option: option,
+                          selected: option.value == _rewriteType,
+                          enabled: !state.syncInProgress,
+                          onTap: () => setState(() {
+                            _rewriteType = option.value;
+                            _candidates = const <AIRewriteCandidate>[];
+                          }),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _instructionController,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      labelText: '补充要求（可选）',
+                      hintText: '例如：更适合考试，或把答案压到一句话。',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: state.syncInProgress ? null : _rewrite,
+                    icon: state.syncInProgress
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.auto_fix_high_outlined),
+                    label: Text(state.syncInProgress ? '优化中…' : '生成优化方案'),
+                  ),
+                  if (state.errorMessage != null) ...<Widget>[
+                    const SizedBox(height: 12),
+                    _AIInlineMessage(
+                      icon: Icons.info_outline_rounded,
+                      text: state.errorMessage!,
+                      color: theme.colorScheme.error,
+                    ),
+                  ],
+                  if (_candidates.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 18),
+                    Text(
+                      '候选版本',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    for (final AIRewriteCandidate candidate
+                        in _candidates) ...<Widget>[
+                      _RewriteCandidateCard(candidate: candidate),
+                      const SizedBox(height: 10),
+                    ],
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -1795,6 +1836,294 @@ class _AIRewriteCardSheetState extends ConsumerState<_AIRewriteCardSheet> {
       return;
     }
     setState(() => _candidates = candidates);
+  }
+}
+
+class _AIRewriteOption {
+  const _AIRewriteOption({
+    required this.value,
+    required this.icon,
+    required this.label,
+    required this.description,
+  });
+
+  final String value;
+  final IconData icon;
+  final String label;
+  final String description;
+}
+
+class _AIRewriteOptionButton extends StatelessWidget {
+  const _AIRewriteOptionButton({
+    required this.option,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final _AIRewriteOption option;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final Color borderColor = selected
+        ? theme.colorScheme.primary.withValues(alpha: 0.42)
+        : theme.colorScheme.outlineVariant;
+    final Color foreground = selected
+        ? theme.colorScheme.primary
+        : theme.colorScheme.onSurfaceVariant;
+    return Semantics(
+      button: true,
+      selected: selected,
+      enabled: enabled,
+      label: option.label,
+      hint: option.description,
+      child: Material(
+        color: selected
+            ? theme.colorScheme.primary.withValues(alpha: 0.08)
+            : theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+          child: Container(
+            width: 142,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+              border: Border.all(color: borderColor),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Icon(option.icon, size: 17, color: foreground),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        option.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          color: foreground,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  option.description,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReadonlySnippet extends StatelessWidget {
+  const _ReadonlySnippet({
+    required this.title,
+    required this.content,
+    this.secondary = '',
+  });
+
+  final String title;
+  final String content;
+  final String secondary;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final String primary = content.trim().isEmpty ? '暂无题干内容' : content.trim();
+    final String answer = secondary.trim();
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            title,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            primary,
+            maxLines: 4,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodyMedium,
+          ),
+          if (answer.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Divider(height: 1, color: theme.colorScheme.outlineVariant),
+            const SizedBox(height: 8),
+            Text(
+              answer,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _RewriteCandidateCard extends StatelessWidget {
+  const _RewriteCandidateCard({required this.candidate});
+
+  final AIRewriteCandidate candidate;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final CardDocumentParts parts = CardDocumentCodec.parse(candidate.content);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(AppDesign.radiusLg),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      candidate.title.isEmpty ? '优化候选' : candidate.title,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (candidate.changeSummary.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 4),
+                      Text(
+                        candidate.changeSummary,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: () => Navigator.of(context).pop(candidate),
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('应用'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _ReadonlySnippet(
+            title: '候选内容',
+            content: parts.prompt,
+            secondary: parts.answer,
+          ),
+          if (candidate.qualityNotes.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: <Widget>[
+                for (final String note in candidate.qualityNotes.take(4))
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primary.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(AppDesign.radiusSm),
+                      border: Border.all(
+                        color: theme.colorScheme.primary.withValues(
+                          alpha: 0.16,
+                        ),
+                      ),
+                    ),
+                    child: Text(
+                      note,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _AIInlineMessage extends StatelessWidget {
+  const _AIInlineMessage({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(AppDesign.radiusMd),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: theme.textTheme.bodySmall?.copyWith(color: color),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -1863,6 +2192,106 @@ class _InlineAnswerLineMarker extends StatelessWidget {
   }
 }
 
+class _EditorCommandBar extends StatelessWidget {
+  const _EditorCommandBar({
+    required this.canSave,
+    required this.hasContent,
+    required this.saving,
+    required this.isCreating,
+    required this.onPreview,
+    required this.onAIRewrite,
+    required this.onSave,
+  });
+
+  final bool canSave;
+  final bool hasContent;
+  final bool saving;
+  final bool isCreating;
+  final VoidCallback onPreview;
+  final VoidCallback onAIRewrite;
+  final VoidCallback onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final bool compact = constraints.maxWidth < 560;
+        final Widget status = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              hasContent ? Icons.circle : Icons.radio_button_unchecked_rounded,
+              size: hasContent ? 8 : 14,
+              color: hasContent
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                hasContent ? '草稿可保存' : '写下题干后可保存',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        );
+        final List<Widget> actions = <Widget>[
+          OutlinedButton.icon(
+            onPressed: onPreview,
+            icon: const Icon(Icons.visibility_outlined),
+            label: const Text('预览'),
+          ),
+          OutlinedButton.icon(
+            onPressed: saving || !hasContent ? null : onAIRewrite,
+            icon: const Icon(Icons.auto_fix_high_outlined),
+            label: const Text('AI 优化'),
+          ),
+          FilledButton.icon(
+            onPressed: canSave ? onSave : null,
+            icon: saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(isCreating ? Icons.add_rounded : Icons.check_rounded),
+            label: Text(isCreating ? '创建卡片' : '保存修改'),
+          ),
+        ];
+
+        if (compact) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              status,
+              const SizedBox(height: 10),
+              Wrap(spacing: 8, runSpacing: 8, children: actions),
+            ],
+          );
+        }
+
+        return Row(
+          children: <Widget>[
+            Expanded(child: status),
+            const SizedBox(width: 12),
+            for (int i = 0; i < actions.length; i++) ...<Widget>[
+              if (i > 0) const SizedBox(width: 8),
+              actions[i],
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _SimpleToolbar extends StatelessWidget {
   const _SimpleToolbar({
     required this.onToggleCloze,
@@ -1892,77 +2321,100 @@ class _SimpleToolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      padding: const EdgeInsets.symmetric(vertical: 7),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerLowest,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: const BorderRadius.vertical(
+          top: Radius.circular(AppDesign.radiusLg),
+        ),
+        border: Border(
+          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
       ),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: <Widget>[
-          _ToolbarButton(
-            tooltip: '填空/取消填空',
-            icon: Icons.hide_source_outlined,
-            label: '填空',
-            onTap: onToggleCloze,
-          ),
-          _ToolbarButton(
-            tooltip: '加粗',
-            icon: Icons.format_bold_rounded,
-            label: '加粗',
-            onTap: onBold,
-          ),
-          _ToolbarButton(
-            tooltip: '荧光笔高亮',
-            icon: Icons.highlight_alt_rounded,
-            label: '高亮',
-            onTap: onHighlight,
-          ),
-          _ToolbarButton(
-            tooltip: '下划线',
-            icon: Icons.format_underlined_rounded,
-            label: '下划线',
-            onTap: onUnderline,
-          ),
-          _ToolbarButton(
-            tooltip: '字号缩小',
-            icon: Icons.text_decrease_rounded,
-            label: '缩小',
-            onTap: onFontDown,
-          ),
-          _ToolbarButton(
-            tooltip: '字号放大',
-            icon: Icons.text_increase_rounded,
-            label: '放大',
-            onTap: onFontUp,
-          ),
-          _ToolbarButton(
-            tooltip: '插入图片',
-            icon: Icons.image_outlined,
-            label: '图片',
-            onTap: onInsertImage,
-          ),
-          _ToolbarButton(
-            tooltip: '在当前光标位置插入答案线',
-            icon: Icons.horizontal_rule_rounded,
-            label: '答案线',
-            onTap: onInsertAnswerLine,
-          ),
-          _ToolbarButton(
-            tooltip: '插入单选题',
-            icon: Icons.radio_button_checked_outlined,
-            label: '单选',
-            onTap: onInsertSingleChoice,
-          ),
-          _ToolbarButton(
-            tooltip: '插入多选题',
-            icon: Icons.check_box_outlined,
-            label: '多选',
-            onTap: onInsertMultiChoice,
-          ),
-        ],
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        child: Row(
+          children: <Widget>[
+            _ToolbarButton(
+              tooltip: '填空/取消填空',
+              icon: Icons.hide_source_outlined,
+              label: '填空',
+              onTap: onToggleCloze,
+            ),
+            const _ToolbarDivider(),
+            _ToolbarButton(
+              tooltip: '加粗',
+              icon: Icons.format_bold_rounded,
+              label: '加粗',
+              onTap: onBold,
+            ),
+            _ToolbarButton(
+              tooltip: '荧光笔高亮',
+              icon: Icons.highlight_alt_rounded,
+              label: '高亮',
+              onTap: onHighlight,
+            ),
+            _ToolbarButton(
+              tooltip: '下划线',
+              icon: Icons.format_underlined_rounded,
+              label: '下划线',
+              onTap: onUnderline,
+            ),
+            _ToolbarButton(
+              tooltip: '字号缩小',
+              icon: Icons.text_decrease_rounded,
+              label: '缩小',
+              onTap: onFontDown,
+            ),
+            _ToolbarButton(
+              tooltip: '字号放大',
+              icon: Icons.text_increase_rounded,
+              label: '放大',
+              onTap: onFontUp,
+            ),
+            const _ToolbarDivider(),
+            _ToolbarButton(
+              tooltip: '插入图片',
+              icon: Icons.image_outlined,
+              label: '图片',
+              onTap: onInsertImage,
+            ),
+            _ToolbarButton(
+              tooltip: '在当前光标位置插入答案线',
+              icon: Icons.horizontal_rule_rounded,
+              label: '答案线',
+              onTap: onInsertAnswerLine,
+            ),
+            _ToolbarButton(
+              tooltip: '插入单选题',
+              icon: Icons.radio_button_checked_outlined,
+              label: '单选',
+              onTap: onInsertSingleChoice,
+            ),
+            _ToolbarButton(
+              tooltip: '插入多选题',
+              icon: Icons.check_box_outlined,
+              label: '多选',
+              onTap: onInsertMultiChoice,
+            ),
+          ],
+        ),
       ),
+    );
+  }
+}
+
+class _ToolbarDivider extends StatelessWidget {
+  const _ToolbarDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 22,
+      margin: const EdgeInsets.symmetric(horizontal: 6),
+      color: Theme.of(context).colorScheme.outlineVariant,
     );
   }
 }
@@ -1988,25 +2440,26 @@ class _ToolbarButton extends StatelessWidget {
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(AppDesign.radiusSm),
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(AppDesign.radiusSm),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Icon(icon, size: 18),
-                const SizedBox(width: 8),
+                Icon(icon, size: 17, color: theme.colorScheme.onSurfaceVariant),
+                const SizedBox(width: 6),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(minWidth: 28),
+                  constraints: const BoxConstraints(minWidth: 24),
                   child: Text(
                     label,
                     textAlign: TextAlign.center,
                     style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
+                      color: theme.colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
@@ -2035,8 +2488,8 @@ class _EditorPreviewPanel extends StatelessWidget {
     final ThemeData theme = Theme.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(24),
+        color: theme.colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(AppDesign.radiusLg),
         border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
       child: Padding(
@@ -2046,7 +2499,7 @@ class _EditorPreviewPanel extends StatelessWidget {
           children: <Widget>[
             Row(
               children: <Widget>[
-                Text('实时预览', style: theme.textTheme.titleMedium),
+                Text('实时预览', style: theme.textTheme.titleSmall),
                 const Spacer(),
                 Icon(
                   Icons.visibility_outlined,
@@ -2064,9 +2517,9 @@ class _EditorPreviewPanel extends StatelessWidget {
             const SizedBox(height: 14),
             Expanded(
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(AppDesign.radiusMd),
                 child: ColoredBox(
-                  color: theme.colorScheme.surfaceContainerLowest,
+                  color: theme.colorScheme.surface,
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: isEmpty

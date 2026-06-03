@@ -26,6 +26,7 @@ void main() {
     expect(find.text('创建卡片'), findsAtLeastNWidgets(1));
     expect(find.byType(TextField), findsWidgets);
     expect(find.text('预览'), findsOneWidget);
+    expect(find.text('AI 优化'), findsOneWidget);
   });
 
   testWidgets('card editor screen renders toolbar on iPhone-sized viewport', (

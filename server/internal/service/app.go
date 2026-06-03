@@ -495,6 +495,85 @@ func (s *AppService) SyncPull(userID string) model.SyncPullResponse {
 	}
 }
 
+func (s *AppService) ListGenerationPolicies(userID string) []model.GenerationPolicy {
+	return s.store.ListGenerationPolicies(userID)
+}
+
+func (s *AppService) CreateGenerationPolicy(userID string, policy model.GenerationPolicy) (model.GenerationPolicy, error) {
+	now := time.Now()
+	policy = effectiveGenerationPolicy(model.AIGenerateRequest{Policy: &policy})
+	policy.ID = repository.NewID()
+	policy.UserID = userID
+	policy.CreatedAt = now
+	policy.UpdatedAt = now
+	if strings.TrimSpace(policy.Name) == "" {
+		policy.Name = "自定义拆卡规则"
+	}
+	if err := s.store.CreateGenerationPolicy(policy); err != nil {
+		return model.GenerationPolicy{}, err
+	}
+	return policy, nil
+}
+
+func (s *AppService) GetGenerationPolicy(userID, policyID string) (model.GenerationPolicy, error) {
+	return s.store.GetGenerationPolicy(userID, policyID)
+}
+
+func (s *AppService) UpdateGenerationPolicy(userID, policyID string, request model.GenerationPolicy) (model.GenerationPolicy, error) {
+	current, err := s.store.GetGenerationPolicy(userID, policyID)
+	if err != nil {
+		return model.GenerationPolicy{}, err
+	}
+	request.ID = current.ID
+	request.UserID = current.UserID
+	request.CreatedAt = current.CreatedAt
+	request.UpdatedAt = time.Now()
+	policy := effectiveGenerationPolicy(model.AIGenerateRequest{Policy: &request})
+	policy.ID = current.ID
+	policy.UserID = current.UserID
+	policy.CreatedAt = current.CreatedAt
+	policy.UpdatedAt = request.UpdatedAt
+	if err := s.store.UpdateGenerationPolicy(policy); err != nil {
+		return model.GenerationPolicy{}, err
+	}
+	return policy, nil
+}
+
+func (s *AppService) DeleteGenerationPolicy(userID, policyID string) error {
+	return s.store.DeleteGenerationPolicy(userID, policyID)
+}
+
+func (s *AppService) CreateAIGenerationJob(userID string, request model.AIGenerateRequest) (model.AIGenerationJob, error) {
+	now := time.Now()
+	job := model.AIGenerationJob{
+		ID:         repository.NewID(),
+		UserID:     userID,
+		SourceName: request.SourceName,
+		SourceType: "text",
+		Status:     "running",
+		Progress:   0,
+		Request:    request,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := s.store.CreateAIGenerationJob(job); err != nil {
+		return model.AIGenerationJob{}, err
+	}
+	result := s.GenerateCards(request)
+	job.Status = "succeeded"
+	job.Progress = 1
+	job.Result = &result
+	job.UpdatedAt = time.Now()
+	if err := s.store.UpdateAIGenerationJob(job); err != nil {
+		return model.AIGenerationJob{}, err
+	}
+	return job, nil
+}
+
+func (s *AppService) GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error) {
+	return s.store.GetAIGenerationJob(userID, jobID)
+}
+
 func sanitizeCards(cards []model.Card) []model.Card {
 	out := make([]model.Card, 0, len(cards))
 	for _, card := range cards {
@@ -725,9 +804,12 @@ func stableReviewOrderValue(deckID, dayKey, group, cardID string) uint64 {
 }
 
 func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGenerateResponse {
+	policy := effectiveGenerationPolicy(request)
 	if hasExternalAIConfig(s.config) {
 		if items, err := s.tryGenerateCardsWithExternalAI(request); err == nil && len(items) > 0 {
-			return model.AIGenerateResponse{Items: items}
+			items = repairGeneratedCardsForPolicy(items, policy)
+			items = attachQualityReports(items, policy)
+			return model.AIGenerateResponse{Items: items, Policy: &policy}
 		}
 	}
 
@@ -745,10 +827,14 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 	if cardCount <= 0 {
 		cardCount = 3
 	}
-	if cardCount > 8 {
+	if cardCount > policy.MaxCardsTotal {
+		cardCount = policy.MaxCardsTotal
+	}
+	if cardCount > 8 && !request.BatchMode {
 		cardCount = 8
 	}
 
+	facts := extractAtomicFacts(context, topic)
 	templates := []struct {
 		front string
 		back  string
@@ -779,31 +865,182 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 	items := make([]model.AIGeneratedCard, 0, cardCount)
 	for i := 0; i < cardCount; i++ {
 		template := templates[i%len(templates)]
+		cardType := "basic"
+		if len(policy.PreferredCardTypes) > 0 {
+			cardType = policy.PreferredCardTypes[i%len(policy.PreferredCardTypes)]
+		}
 		answerContext := context
+		if len(facts) > 0 {
+			answerContext = facts[i%len(facts)]
+		}
 		if answerContext == "" {
 			answerContext = fmt.Sprintf("结合当前项目语境，以 %s 难度总结关键概念、例子与常见误区", difficulty)
 		}
 		prompt := fmt.Sprintf(template.front, topic)
 		answer := fmt.Sprintf(template.back, topic, answerContext)
+		if len(facts) > 0 {
+			prompt = fallbackPromptForFact(topic, answerContext, i)
+			answer = answerContext
+		}
+		content := composeCardContent(prompt, answer)
+		if cardType == "single_choice" {
+			content = composeSingleChoiceCardContent(
+				prompt,
+				shortChoiceOption(answerContext),
+				fallbackChoiceDistractors(topic, answerContext, facts, i),
+				answer,
+			)
+		} else if cardType == "multi_choice" {
+			correct := fallbackMultiChoiceCorrectOptions(answerContext, facts, i)
+			content = composeMultiChoiceCardContent(
+				prompt,
+				correct,
+				fallbackChoiceDistractors(topic, strings.Join(correct, "；"), facts, i),
+				answer,
+			)
+		}
 		items = append(items, model.AIGeneratedCard{
 			Title:          prompt,
-			Content:        composeCardContent(prompt, answer),
+			Content:        content,
 			Front:          prompt,
 			Back:           answer,
-			CardType:       "basic",
+			CardType:       cardType,
 			KnowledgePoint: topic,
 			SourceExcerpt:  previewText(answerContext, 160),
+			SourceLocation: strings.TrimSpace(request.SourceName),
 			Difficulty:     difficulty,
 			Tags:           []string{"AI生成", topic, difficulty},
 			Note:           template.note,
 		})
 	}
 
-	return model.AIGenerateResponse{Items: items}
+	items = repairGeneratedCardsForPolicy(items, policy)
+	items = attachQualityReports(items, policy)
+	return model.AIGenerateResponse{Items: items, Policy: &policy}
+}
+
+func extractAtomicFacts(context string, topic string) []string {
+	context = strings.TrimSpace(context)
+	if context == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(context, func(r rune) bool {
+		switch r {
+		case '\n', '。', '；', ';', '.', '!', '！', '?', '？':
+			return true
+		default:
+			return false
+		}
+	})
+	facts := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		fact := strings.TrimSpace(part)
+		fact = strings.Trim(fact, "，, ")
+		if fact == "" {
+			continue
+		}
+		key := strings.ToLower(strings.Join(strings.Fields(fact), " "))
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		facts = append(facts, fact)
+	}
+	return facts
+}
+
+func fallbackPromptForFact(topic string, fact string, index int) string {
+	keyword := factKeyword(fact)
+	if keyword == "" {
+		keyword = fmt.Sprintf("第%d个要点", index+1)
+	}
+	aspects := []string{"含义", "作用", "复习要点", "考试提示", "辨析点", "应用"}
+	aspect := aspects[index%len(aspects)]
+	return fmt.Sprintf("%s中，%s的%s是什么？", strings.TrimSpace(topic), keyword, aspect)
+}
+
+func factKeyword(fact string) string {
+	fact = strings.TrimSpace(fact)
+	if fact == "" {
+		return ""
+	}
+	cutMarkers := []string{"规定", "指导", "帮助", "强调", "定义", "是", "包括", "连接", "connect", "define", "guide", "help"}
+	end := len([]rune(fact))
+	for _, marker := range cutMarkers {
+		if idx := strings.Index(fact, marker); idx > 0 {
+			end = len([]rune(fact[:idx]))
+			break
+		}
+	}
+	runes := []rune(fact)
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if end > 24 {
+		end = 24
+	}
+	return strings.TrimSpace(string(runes[:end]))
+}
+
+func repairGeneratedCardsForPolicy(items []model.AIGeneratedCard, policy model.GenerationPolicy) []model.AIGeneratedCard {
+	seenPrompts := map[string]int{}
+	repaired := make([]model.AIGeneratedCard, 0, len(items))
+	for _, item := range items {
+		prompt, answer := splitCardContent(item.Content)
+		if strings.TrimSpace(prompt) == "" {
+			prompt = item.Front
+		}
+		if strings.TrimSpace(prompt) == "" {
+			prompt = item.Title
+		}
+		if strings.TrimSpace(answer) == "" {
+			answer = item.Back
+		}
+		answer = limitRunes(strings.TrimSpace(answer), policy.MaxAnswerChars)
+		if isChoiceCardType(item.CardType) && !containsImplementedChoiceDSL(prompt) {
+			if dsl, ok := plainChoicePromptToImplementedDSL(prompt, answer, item.CardType == "multi_choice"); ok {
+				prompt = dsl
+			} else if item.CardType == "single_choice" {
+				prompt = composeSingleChoicePrompt(prompt, answer, fallbackChoiceDistractors(item.KnowledgePoint, answer, nil, 0))
+			} else {
+				correct := []string{answer}
+				prompt = composeMultiChoicePrompt(prompt, correct, fallbackChoiceDistractors(item.KnowledgePoint, answer, nil, 0))
+			}
+		}
+		key := strings.ToLower(strings.Join(strings.Fields(prompt), " "))
+		if key != "" {
+			seenPrompts[key]++
+			if seenPrompts[key] > 1 {
+				prompt = appendAngleToPrompt(prompt, seenPrompts[key])
+			}
+		}
+		item.Title = titleFromPromptForCard(prompt)
+		item.Front = prompt
+		item.Back = answer
+		item.Content = composeCardContent(prompt, answer)
+		repaired = append(repaired, item)
+	}
+	return repaired
+}
+
+func limitRunes(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	if max == 1 {
+		return string(runes[:1])
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, doc extractedDocument) model.AIGenerateResponse {
-	request.Context = doc.Text
+	policy := effectiveGenerationPolicy(request)
 	if strings.TrimSpace(request.Topic) == "" {
 		request.Topic = strings.TrimSuffix(doc.Title, filepath.Ext(doc.Title))
 	}
@@ -811,15 +1048,77 @@ func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, 
 	if strings.TrimSpace(request.Strategy) == "" {
 		request.Strategy = "fsrs_friendly"
 	}
-	response := s.GenerateCards(request)
+	chunks := chunkDocument(doc, policy)
+	if len(chunks) == 0 {
+		request.Context = doc.Text
+		chunks = []documentChunk{{
+			Index:          0,
+			HeadingPath:    request.Topic,
+			Text:           doc.Text,
+			SourceLocation: doc.Title,
+		}}
+	}
+
+	remaining := policy.MaxCardsTotal
+	if request.CardCount > 0 && request.CardCount < remaining {
+		remaining = request.CardCount
+	}
+	items := make([]model.AIGeneratedCard, 0, remaining)
+	for _, chunk := range chunks {
+		if remaining <= 0 {
+			break
+		}
+		chunkRequest := request
+		chunkRequest.Context = chunk.Text
+		chunkRequest.SourceName = firstNonEmpty(chunk.SourceLocation, chunk.HeadingPath, doc.Title)
+		chunkRequest.CardCount = policy.MaxCardsPerChunk
+		if chunkRequest.CardCount > remaining {
+			chunkRequest.CardCount = remaining
+		}
+		chunkRequest.BatchMode = true
+		chunkResponse := s.GenerateCards(chunkRequest)
+		for _, item := range chunkResponse.Items {
+			if strings.TrimSpace(item.SourceLocation) == "" {
+				item.SourceLocation = chunkRequest.SourceName
+			}
+			if strings.TrimSpace(item.SourceExcerpt) == "" {
+				item.SourceExcerpt = previewText(chunk.Text, 160)
+			}
+			items = append(items, item)
+			remaining--
+			if remaining <= 0 {
+				break
+			}
+		}
+	}
+	items = attachQualityReports(items, policy)
+	response := model.AIGenerateResponse{Items: items, Policy: &policy}
 	response.Document = &model.AIDocumentSummary{
 		Title:       doc.Title,
 		MimeType:    doc.MimeType,
 		TextPreview: doc.TextPreview,
 		TextLength:  doc.TextLength,
 		PageCount:   doc.PageCount,
+		ChunkCount:  len(chunks),
+		ImageCount:  doc.ImageCount,
+		Images:      importedImagesFromExtracted(doc.Images),
 	}
 	return response
+}
+
+func importedImagesFromExtracted(images []extractedImage) []model.AIImportedImage {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]model.AIImportedImage, 0, len(images))
+	for _, image := range images {
+		out = append(out, model.AIImportedImage{
+			Alt:      image.Alt,
+			Source:   image.Source,
+			IsRemote: image.IsRemote,
+		})
+	}
+	return out
 }
 
 func (s *AppService) GenerateCardsFromUpload(request model.AIGenerateRequest, header *multipart.FileHeader) (model.AIGenerateResponse, error) {
@@ -876,7 +1175,32 @@ func (s *AppService) RewriteCardWithAI(request model.AIRewriteCardRequest) model
 		nextPrompt = strings.TrimSpace(prompt) + "\n\n{single-choice}\n? " + firstLine(prompt) + "\n* 正确： " + firstLine(answer) + "\n- 干扰项： 相近但不准确的说法\n{/single-choice}"
 		changeSummary = "改写为单选题草稿，保留正确答案并提示后续补充干扰项。"
 	case "split":
+		parts := splitAnswerIntoAtomicParts(answer)
+		if len(parts) > 1 {
+			candidates := make([]model.AIRewriteCandidate, 0, len(parts))
+			for _, part := range parts {
+				partTitle := firstNonEmpty(firstLine(part), title)
+				partPrompt := fmt.Sprintf("%s：%s", strings.TrimSuffix(title, "？"), partTitle)
+				candidates = append(candidates, model.AIRewriteCandidate{
+					Title:         partTitle,
+					Content:       composeCardContent(partPrompt, part),
+					ChangeSummary: "拆成原子卡，每张只保留一个可自评知识点。",
+					QualityNotes: []string{
+						"一卡一知识点",
+						"答案尽量短且可自评",
+						"保存后仍由服务端 FSRS 按真实复习表现排期",
+					},
+				})
+			}
+			return model.AIRewriteCardResponse{Candidates: candidates}
+		}
 		changeSummary = "建议拆分为多张原子卡；当前候选保留原卡并压缩表达。"
+	case "chat_refine":
+		if strings.Contains(instruction, "不要改题干") {
+			nextPrompt = prompt
+		}
+		nextAnswer = conversationalAnswerFallback(answer, instruction)
+		changeSummary = "根据对话需求微调被引用的卡片内容。"
 	default:
 		nextPrompt = strings.TrimSuffix(strings.TrimSpace(prompt), "？") + "？"
 	}
@@ -897,6 +1221,132 @@ func (s *AppService) RewriteCardWithAI(request model.AIRewriteCardRequest) model
 	}
 }
 
+func (s *AppService) RewriteCardsWithAI(request model.AIRewriteBatchRequest) model.AIRewriteBatchResponse {
+	results := make([]model.AIRewriteBatchResult, 0, len(request.Cards))
+	for _, card := range request.Cards {
+		if strings.TrimSpace(card.RewriteType) == "" {
+			card.RewriteType = request.RewriteType
+		}
+		if strings.TrimSpace(card.Instruction) == "" {
+			card.Instruction = request.Instruction
+		}
+		response := s.RewriteCardWithAI(card)
+		results = append(results, model.AIRewriteBatchResult{
+			CardID:     card.CardID,
+			Candidates: response.Candidates,
+		})
+	}
+	return model.AIRewriteBatchResponse{Results: results}
+}
+
+func (s *AppService) ChatCardsWithAI(request model.AICardChatRequest) model.AICardChatResponse {
+	instruction := strings.TrimSpace(request.Instruction)
+	if instruction == "" {
+		instruction = "请根据我的需求继续设计或微调卡片。"
+	}
+	items := append([]model.AIGeneratedCard(nil), request.Items...)
+	if request.Reference != nil && request.Reference.CardIndex >= 0 && request.Reference.CardIndex < len(items) {
+		index := request.Reference.CardIndex
+		item := items[index]
+		quoted := referencedCardText(item, *request.Reference)
+		rewrite := s.RewriteCardWithAI(model.AIRewriteCardRequest{
+			Title:       item.Title,
+			Content:     item.Content,
+			RewriteType: "chat_refine",
+			Instruction: fmt.Sprintf("%s\n\n用户引用了%s：\n%s", instruction, referencePartLabel(request.Reference.Part), quoted),
+		})
+		if len(rewrite.Candidates) > 0 {
+			candidate := rewrite.Candidates[0]
+			items[index] = model.AIGeneratedCard{
+				Title:          firstNonEmpty(candidate.Title, item.Title),
+				Content:        firstNonEmpty(candidate.Content, item.Content),
+				Tags:           item.Tags,
+				Note:           item.Note,
+				CardType:       item.CardType,
+				KnowledgePoint: item.KnowledgePoint,
+				SourceExcerpt:  item.SourceExcerpt,
+				SourceLocation: item.SourceLocation,
+				Difficulty:     item.Difficulty,
+			}
+		}
+		policy := effectiveGenerationPolicy(model.AIGenerateRequest{Policy: request.Policy})
+		return model.AICardChatResponse{
+			AssistantMessage: fmt.Sprintf("已根据你的要求微调第 %d 张卡片，并保留在右侧预览区。", index+1),
+			Items:            attachQualityReports(items, policy),
+			UpdatedIndex:     &index,
+		}
+	}
+
+	cardCount := request.CardCount
+	if cardCount <= 0 {
+		cardCount = 4
+	}
+	generated := s.GenerateCards(model.AIGenerateRequest{
+		Topic:      firstNonEmpty(request.Topic, "AI 对话制卡"),
+		Context:    buildCardChatContext(request.Messages, items, instruction),
+		CardCount:  cardCount,
+		Difficulty: firstNonEmpty(request.Difficulty, "medium"),
+		Policy:     request.Policy,
+	})
+	return model.AICardChatResponse{
+		AssistantMessage: fmt.Sprintf("我根据这轮需求生成了 %d 张草稿，已放到右侧预览区。你可以继续引用其中任意一张让我微调。", len(generated.Items)),
+		Items:            generated.Items,
+	}
+}
+
+func referencedCardText(item model.AIGeneratedCard, ref model.AICardReference) string {
+	if strings.TrimSpace(ref.Text) != "" {
+		return strings.TrimSpace(ref.Text)
+	}
+	prompt, answer := splitCardContent(item.Content)
+	switch strings.TrimSpace(ref.Part) {
+	case "prompt":
+		return prompt
+	case "answer":
+		return answer
+	case "note":
+		return item.Note
+	default:
+		return strings.TrimSpace(item.Title + "\n\n" + item.Content)
+	}
+}
+
+func referencePartLabel(part string) string {
+	switch strings.TrimSpace(part) {
+	case "prompt":
+		return "题干"
+	case "answer":
+		return "答案"
+	case "note":
+		return "备注"
+	default:
+		return "整张卡片"
+	}
+}
+
+func buildCardChatContext(messages []model.AICardChatMessage, items []model.AIGeneratedCard, instruction string) string {
+	var builder strings.Builder
+	builder.WriteString("用户最新需求：")
+	builder.WriteString(instruction)
+	builder.WriteString("\n\n聊天上下文：\n")
+	for _, message := range messages {
+		if strings.TrimSpace(message.Content) == "" {
+			continue
+		}
+		builder.WriteString(strings.TrimSpace(message.Role))
+		builder.WriteString(": ")
+		builder.WriteString(strings.TrimSpace(message.Content))
+		builder.WriteString("\n")
+	}
+	if len(items) > 0 {
+		builder.WriteString("\n当前草稿摘要：\n")
+		for i, item := range items {
+			builder.WriteString(fmt.Sprintf("%d. %s\n", i+1, firstNonEmpty(item.Title, firstLine(item.Content))))
+		}
+	}
+	return builder.String()
+}
+
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return strings.TrimSpace(text)
@@ -910,6 +1360,38 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitAnswerIntoAtomicParts(answer string) []string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return nil
+	}
+	replacer := strings.NewReplacer("；", "\n", ";", "\n", "。", "\n")
+	lines := strings.Split(replacer.Replace(answer), "\n")
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts = append(parts, line)
+	}
+	return parts
+}
+
+func conversationalAnswerFallback(answer, instruction string) string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		answer = "需要根据题干进行自我检查。"
+	}
+	if strings.Contains(instruction, "口语") {
+		return "可以这样记：" + strings.TrimSuffix(answer, "。") + "。"
+	}
+	if strings.Contains(instruction, "更短") || strings.Contains(instruction, "简短") {
+		return firstNonEmpty(firstLine(answer), answer)
+	}
+	return strings.TrimSuffix(answer, "。") + "（已按对话要求微调）。"
 }
 
 func applyCardContentCompat(card *model.Card) {
@@ -947,6 +1429,239 @@ func composeCardContent(prompt, answer string) string {
 		return "@answer\n" + trimmedAnswer + "\n@end"
 	}
 	return trimmedPrompt + "\n\n@answer\n" + trimmedAnswer + "\n@end"
+}
+
+func composeSingleChoiceCardContent(question, correct string, distractors []string, answer string) string {
+	return composeCardContent(composeSingleChoicePrompt(question, correct, distractors), answer)
+}
+
+func composeMultiChoiceCardContent(question string, correctOptions, distractors []string, answer string) string {
+	return composeCardContent(composeMultiChoicePrompt(question, correctOptions, distractors), answer)
+}
+
+func composeSingleChoicePrompt(question, correct string, distractors []string) string {
+	correct = firstNonEmpty(shortChoiceOption(correct), "正确表述")
+	options := compactStrings(append([]string{correct}, normalizeChoiceOptions(distractors)...))
+	for len(options) < 4 {
+		options = append(options, fallbackDistractorByIndex(len(options)))
+	}
+	var builder strings.Builder
+	builder.WriteString("{single-choice}\n")
+	builder.WriteString("Q: " + strings.TrimSpace(question) + "\n")
+	builder.WriteString("* " + options[0] + "\n")
+	for _, option := range options[1:] {
+		builder.WriteString("- " + option + "\n")
+	}
+	builder.WriteString("{/single-choice}")
+	return builder.String()
+}
+
+func composeMultiChoicePrompt(question string, correctOptions, distractors []string) string {
+	correct := compactStrings(normalizeChoiceOptions(correctOptions))
+	if len(correct) == 0 {
+		correct = []string{"正确表述"}
+	}
+	options := compactStrings(append(correct, normalizeChoiceOptions(distractors)...))
+	for len(options) < len(correct)+2 {
+		options = append(options, fallbackDistractorByIndex(len(options)))
+	}
+	var builder strings.Builder
+	builder.WriteString("{multi-choice}\n")
+	builder.WriteString("Q: " + strings.TrimSpace(question) + "\n")
+	for _, option := range correct {
+		builder.WriteString("* " + option + "\n")
+	}
+	for _, option := range options[len(correct):] {
+		builder.WriteString("- " + option + "\n")
+	}
+	builder.WriteString("{/multi-choice}")
+	return builder.String()
+}
+
+func normalizeChoiceOptions(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		option := shortChoiceOption(value)
+		if option != "" {
+			out = append(out, option)
+		}
+	}
+	return out
+}
+
+func shortChoiceOption(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "。；;，,")
+	if value == "" {
+		return ""
+	}
+	return limitRunes(value, 36)
+}
+
+func fallbackChoiceDistractors(topic, correct string, facts []string, index int) []string {
+	out := make([]string, 0, 3)
+	correct = strings.TrimSpace(correct)
+	for offset := 1; offset <= len(facts) && len(out) < 3; offset++ {
+		candidate := strings.TrimSpace(facts[(index+offset)%len(facts)])
+		if candidate != "" && candidate != correct {
+			out = append(out, candidate)
+		}
+	}
+	out = append(out,
+		fmt.Sprintf("只表示%s的材料名称", firstNonEmpty(strings.TrimSpace(topic), "该知识点")),
+		"与学习反馈和概念理解无关",
+		"只用于最终排名，不支持学习改进",
+	)
+	return compactStrings(out)
+}
+
+func fallbackMultiChoiceCorrectOptions(answerContext string, facts []string, index int) []string {
+	correct := []string{answerContext}
+	for offset := 1; offset <= len(facts) && len(correct) < 2; offset++ {
+		candidate := strings.TrimSpace(facts[(index+offset)%len(facts)])
+		if candidate != "" && candidate != answerContext {
+			correct = append(correct, candidate)
+		}
+	}
+	return correct
+}
+
+func fallbackDistractorByIndex(index int) string {
+	options := []string{
+		"与题干核心概念无关",
+		"只描述表面现象",
+		"把原因和结果倒置",
+		"把局部条件当成完整定义",
+	}
+	return options[index%len(options)]
+}
+
+func isChoiceCardType(cardType string) bool {
+	cardType = strings.TrimSpace(strings.ToLower(cardType))
+	return cardType == "single_choice" || cardType == "multi_choice"
+}
+
+func containsImplementedChoiceDSL(content string) bool {
+	return strings.Contains(content, "{single-choice}") || strings.Contains(content, "{multi-choice}")
+}
+
+func titleFromPromptForCard(prompt string) string {
+	if !containsImplementedChoiceDSL(prompt) {
+		return prompt
+	}
+	for _, line := range strings.Split(prompt, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Q:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "Q:"))
+		}
+	}
+	return firstLine(prompt)
+}
+
+func appendAngleToPrompt(prompt string, angle int) string {
+	suffix := fmt.Sprintf("（角度%d）", angle)
+	if !containsImplementedChoiceDSL(prompt) {
+		return fmt.Sprintf("%s%s", strings.TrimSpace(prompt), suffix)
+	}
+	lines := strings.Split(prompt, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Q:") {
+			lines[i] = strings.TrimRight(line, " \t") + suffix
+			return strings.Join(lines, "\n")
+		}
+	}
+	return fmt.Sprintf("%s%s", strings.TrimSpace(prompt), suffix)
+}
+
+func plainChoicePromptToImplementedDSL(prompt, answer string, forceMulti bool) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n")
+	stemLines := make([]string, 0, len(lines))
+	type option struct {
+		id   string
+		text string
+	}
+	options := make([]option, 0)
+	for _, line := range lines {
+		id, text, ok := parseLetteredChoiceLine(line)
+		if !ok {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "正确答案") {
+				stemLines = append(stemLines, trimmed)
+			}
+			continue
+		}
+		options = append(options, option{id: id, text: text})
+	}
+	if len(options) < 2 {
+		return "", false
+	}
+	correctIDs := map[string]struct{}{}
+	for _, opt := range options {
+		if answerReferencesOption(answer, opt.id, opt.text) {
+			correctIDs[opt.id] = struct{}{}
+		}
+	}
+	if len(correctIDs) == 0 {
+		return "", false
+	}
+	var builder strings.Builder
+	if forceMulti || len(correctIDs) > 1 || strings.Contains(strings.Join(stemLines, "\n"), "多选") {
+		builder.WriteString("{multi-choice}\n")
+	} else {
+		builder.WriteString("{single-choice}\n")
+	}
+	builder.WriteString("Q: " + strings.TrimSpace(strings.Join(stemLines, "\n")) + "\n")
+	for _, opt := range options {
+		if _, ok := correctIDs[opt.id]; ok {
+			builder.WriteString("* " + opt.id + ". " + opt.text + "\n")
+		} else {
+			builder.WriteString("- " + opt.id + ". " + opt.text + "\n")
+		}
+	}
+	if strings.HasPrefix(builder.String(), "{multi-choice}") {
+		builder.WriteString("{/multi-choice}")
+	} else {
+		builder.WriteString("{/single-choice}")
+	}
+	return builder.String(), true
+}
+
+func parseLetteredChoiceLine(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	runes := []rune(trimmed)
+	if len(runes) < 3 {
+		return "", "", false
+	}
+	letter := strings.ToUpper(string(runes[0]))
+	if letter < "A" || letter > "H" {
+		return "", "", false
+	}
+	switch runes[1] {
+	case '.', '、', ')', '）':
+	default:
+		return "", "", false
+	}
+	text := strings.TrimSpace(string(runes[2:]))
+	if text == "" {
+		return "", "", false
+	}
+	return letter, text, true
+}
+
+func answerReferencesOption(answer, id, optionText string) bool {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return false
+	}
+	upper := strings.ToUpper(answer)
+	id = strings.ToUpper(id)
+	return upper == id ||
+		strings.Contains(upper, id+".") ||
+		strings.Contains(upper, id+"、") ||
+		strings.Contains(upper, id+")") ||
+		strings.Contains(upper, id+"）") ||
+		strings.Contains(answer, optionText)
 }
 
 func splitCardContent(content string) (string, string) {

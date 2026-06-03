@@ -15,20 +15,20 @@ class AppResponsive {
 
   static double horizontalPadding(double width) {
     if (width >= wideContentBreakpoint) {
-      return 32;
+      return 40;
     }
     if (width >= railBreakpoint) {
-      return 24;
+      return 32;
     }
-    return 16;
+    return 18;
   }
 
   static double defaultPageMaxWidth(double width) {
     if (width >= wideContentBreakpoint) {
-      return 1120;
+      return 1080;
     }
     if (width >= railBreakpoint) {
-      return 1040;
+      return 960;
     }
     return double.infinity;
   }
@@ -39,8 +39,8 @@ class AppPageScrollView extends StatelessWidget {
     super.key,
     required this.children,
     this.maxWidth,
-    this.topPadding = 16,
-    this.bottomPadding = 24,
+    this.topPadding = 18,
+    this.bottomPadding = 32,
     this.keyboardDismissBehavior = ScrollViewKeyboardDismissBehavior.manual,
   });
 

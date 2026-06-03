@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flashcard}
+      POSTGRES_USER: ${POSTGRES_USER:-flashcard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - flashcard_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flashcard} -d ${POSTGRES_DB:-flashcard}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: ../server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      STORE_DRIVER: postgres
+      DATABASE_URL: postgres://${POSTGRES_USER:-flashcard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-flashcard}?sslmode=disable
+      AUTO_MIGRATE: "true"
+      JWT_SECRET: ${JWT_SECRET}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}
+      AI_MODEL: ${AI_MODEL:-deepseek-v4-pro}
+      AI_API_KEY: ${AI_API_KEY}
+    ports:
+      - "8080:8080"
+
+volumes:
+  flashcard_pgdata:

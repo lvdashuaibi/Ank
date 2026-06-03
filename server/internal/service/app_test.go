@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -579,5 +583,487 @@ func TestDeleteFolderKeepsDecksAndClearsFolderID(t *testing.T) {
 	decks := service.ListDecks(user.ID)
 	if len(decks) < 2 {
 		t.Fatalf("expected default deck plus retained deck, got %d", len(decks))
+	}
+}
+
+func TestGenerateCardsAppliesPolicyAndReportsQuality(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:      "教育学原理",
+		Context:    "教育学研究教育现象、教育问题和教育规律。教育目的、教育制度和教师专业发展都需要拆成独立知识点。",
+		CardCount:  3,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			Name:               "教育学精读",
+			AtomicityLevel:     "strict",
+			AnswerStyle:        "one_sentence",
+			MaxAnswerChars:     24,
+			PreferredCardTypes: []string{"basic", "cloze"},
+			CoverageMode:       "balanced",
+			SplitStrategy:      "by_heading",
+			RepairMode:         "violations_only",
+			CustomRules:        "避免宽泛论述题，优先拆成可自评的概念卡。",
+		},
+	})
+
+	if response.Policy == nil {
+		t.Fatalf("expected response to include effective policy snapshot")
+	}
+	if response.Policy.Name != "教育学精读" {
+		t.Fatalf("expected custom policy name, got %q", response.Policy.Name)
+	}
+	if response.Policy.MaxAnswerChars != 24 {
+		t.Fatalf("expected custom max answer chars, got %d", response.Policy.MaxAnswerChars)
+	}
+	if len(response.Items) == 0 {
+		t.Fatalf("expected generated cards")
+	}
+	for _, item := range response.Items {
+		if item.QualityReport == nil {
+			t.Fatalf("expected quality report for card %q", item.Title)
+		}
+		if item.QualityReport.Score <= 0 {
+			t.Fatalf("expected positive quality score for card %q, got %.2f", item.Title, item.QualityReport.Score)
+		}
+	}
+}
+
+func TestGenerateCardsRepairsFallbackOutputToPolicy(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:      "教育学原理",
+		Context:    "教育目的规定人才培养方向；教学原则指导教学设计；反馈帮助学生修正学习；迁移强调知识在新情境中的应用。",
+		CardCount:  6,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			AtomicityLevel: "strict",
+			AnswerStyle:    "one_sentence",
+			MaxAnswerChars: 36,
+		},
+	})
+
+	if len(response.Items) != 6 {
+		t.Fatalf("expected 6 cards, got %d", len(response.Items))
+	}
+	seenPrompts := map[string]struct{}{}
+	for _, item := range response.Items {
+		prompt, answer := splitCardContent(item.Content)
+		if prompt == "" {
+			t.Fatalf("expected prompt for card %+v", item)
+		}
+		key := strings.ToLower(strings.Join(strings.Fields(prompt), " "))
+		if _, exists := seenPrompts[key]; exists {
+			t.Fatalf("expected fallback generator to avoid duplicate prompt %q", prompt)
+		}
+		seenPrompts[key] = struct{}{}
+		if got := utf8.RuneCountInString(strings.TrimSpace(answer)); got > 36 {
+			t.Fatalf("expected answer <= 36 chars, got %d: %q", got, answer)
+		}
+		if item.QualityReport == nil {
+			t.Fatalf("expected quality report for card %q", item.Title)
+		}
+		for _, violation := range item.QualityReport.Violations {
+			if violation.Code == "answer_too_long" || violation.Code == "duplicate_prompt" {
+				t.Fatalf("expected repair to avoid %s for card %q", violation.Code, item.Title)
+			}
+		}
+	}
+}
+
+func TestGenerateCardsUsesLegacyCardTypesWhenPolicyDoesNotOverride(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:      "教育学原理",
+		Context:    "教育制度是教育活动组织运行的制度体系。",
+		CardCount:  2,
+		Difficulty: "medium",
+		CardTypes:  []string{"multi_choice"},
+	})
+
+	if len(response.Items) == 0 {
+		t.Fatalf("expected generated cards")
+	}
+	for _, item := range response.Items {
+		if item.CardType != "multi_choice" {
+			t.Fatalf("expected legacy card_types to drive output, got %q", item.CardType)
+		}
+		if !strings.Contains(item.Content, "{multi-choice}") {
+			t.Fatalf("expected multi choice cards to use interactive DSL, got %q", item.Content)
+		}
+		if !strings.Contains(item.Content, "* ") {
+			t.Fatalf("expected multi choice DSL to mark correct options, got %q", item.Content)
+		}
+	}
+}
+
+func TestBuildAIPromptRequiresImplementedChoiceDSL(t *testing.T) {
+	prompt := buildAIPrompt(model.AIGenerateRequest{
+		Topic:     "教育学原理",
+		Context:   "形成性评价强调及时反馈。",
+		CardCount: 2,
+		Policy: &model.GenerationPolicy{
+			PreferredCardTypes: []string{"single_choice", "multi_choice"},
+		},
+	})
+
+	for _, expected := range []string{
+		"{single-choice}",
+		"{multi-choice}",
+		"* 正确选项",
+		"- 干扰项",
+		"不要把选择题写成 A/B/C/D 普通文本",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("expected prompt to include %q, got:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestExternalAIAgentLoopExecutesCardGenerationTool(t *testing.T) {
+	callCount := 0
+	fakeAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var requestBody map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode chat request: %v", err)
+		}
+		if callCount == 1 {
+			if _, ok := requestBody["tools"].([]any); !ok {
+				t.Fatalf("expected first request to include tools, got %+v", requestBody)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"create_single_choice_card","arguments":"{\"title\":\"形成性评估\",\"question\":\"形成性评估的主要作用是什么？\",\"correct_answer\":\"支持及时反馈\",\"distractors\":[\"提供最终等级\",\"确定课程目标\",\"定义学习者发展\"],\"answer\":\"形成性评估主要用于支持及时反馈。\"}"}}]}}]}`))
+			return
+		}
+		messages, ok := requestBody["messages"].([]any)
+		if !ok || len(messages) < 3 {
+			t.Fatalf("expected follow-up request to include tool result messages, got %+v", requestBody)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"items\":[]}"}}]}`))
+	}))
+	defer fakeAI.Close()
+
+	service := NewAppService(config.Config{
+		JWTSecret: "test-secret",
+		AIBaseURL: fakeAI.URL,
+		AIAPIKey:  "test-key",
+		AIModel:   "deepseek-v4-pro",
+	}, repository.NewMemoryStore(), zap.NewNop())
+
+	items, err := service.tryGenerateCardsWithExternalAI(model.AIGenerateRequest{
+		Topic:     "教育学原理",
+		Context:   "形成性评估强调及时反馈。",
+		CardCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("generate with fake tool-calling AI: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected agent loop to make two chat calls, got %d", callCount)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one tool-generated card, got %d", len(items))
+	}
+	if items[0].CardType != "single_choice" {
+		t.Fatalf("expected single choice card, got %q", items[0].CardType)
+	}
+	if !strings.Contains(items[0].Content, "{single-choice}") || !strings.Contains(items[0].Content, "* 支持及时反馈") {
+		t.Fatalf("expected implemented choice DSL, got %q", items[0].Content)
+	}
+}
+
+func TestGenerateCardsFromMarkdownDocumentIncludesImageSummary(t *testing.T) {
+	service := newTestAppService(t)
+	doc, err := extractDocumentText("education.md", "text/markdown", []byte(strings.Join([]string{
+		"# 教育目的",
+		"",
+		"教育目的规定人才培养方向。",
+		"",
+		"![教育目的结构图](images/aims.png)",
+	}, "\n")))
+	if err != nil {
+		t.Fatalf("extract markdown: %v", err)
+	}
+
+	response := service.GenerateCardsFromDocument(model.AIGenerateRequest{
+		Topic:      "教育学原理",
+		CardCount:  2,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			AtomicityLevel:   "strict",
+			AnswerStyle:      "one_sentence",
+			MaxAnswerChars:   60,
+			SplitStrategy:    "by_heading",
+			MaxCardsPerChunk: 2,
+			MaxCardsTotal:    2,
+		},
+	}, doc)
+
+	if response.Document == nil {
+		t.Fatal("expected document summary")
+	}
+	if response.Document.ImageCount != 1 {
+		t.Fatalf("expected one image, got %+v", response.Document)
+	}
+	if len(response.Document.Images) != 1 || response.Document.Images[0].Source != "images/aims.png" {
+		t.Fatalf("unexpected image summary: %+v", response.Document.Images)
+	}
+	if !strings.Contains(response.Document.TextPreview, "图片") {
+		t.Fatalf("expected image placeholder in preview, got %q", response.Document.TextPreview)
+	}
+	if len(response.Items) == 0 {
+		t.Fatal("expected generated cards")
+	}
+}
+
+func TestGenerationPolicyServiceCRUD(t *testing.T) {
+	service := newTestAppService(t)
+	user := registerTestUser(t, service, "policy@example.com")
+
+	created, err := service.CreateGenerationPolicy(user.ID, model.GenerationPolicy{
+		Name:               "教育学模板",
+		AtomicityLevel:     "strict",
+		MaxAnswerChars:     36,
+		PreferredCardTypes: []string{"basic"},
+	})
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	if created.ID == "" || created.UserID != user.ID {
+		t.Fatalf("expected created policy to include id and owner, got %+v", created)
+	}
+
+	updated, err := service.UpdateGenerationPolicy(user.ID, created.ID, model.GenerationPolicy{
+		Name:               "教育学考试模板",
+		AtomicityLevel:     "strict",
+		MaxAnswerChars:     28,
+		PreferredCardTypes: []string{"basic", "cloze"},
+	})
+	if err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+	if updated.Name != "教育学考试模板" || updated.MaxAnswerChars != 28 {
+		t.Fatalf("unexpected updated policy: %+v", updated)
+	}
+	items := service.ListGenerationPolicies(user.ID)
+	if len(items) != 1 {
+		t.Fatalf("expected one policy, got %d", len(items))
+	}
+	if err := service.DeleteGenerationPolicy(user.ID, created.ID); err != nil {
+		t.Fatalf("delete policy: %v", err)
+	}
+	if len(service.ListGenerationPolicies(user.ID)) != 0 {
+		t.Fatalf("expected deleted policy to be absent")
+	}
+}
+
+func TestDocumentChunkerUsesMarkdownHeadings(t *testing.T) {
+	policy := defaultGenerationPolicy()
+	doc := extractedDocument{
+		Title: "education.md",
+		Text: strings.Join([]string{
+			"# 第一章 教育与教育学",
+			"",
+			"教育是培养人的社会活动。教育学研究教育现象、教育问题和教育规律。",
+			"",
+			"## 教育的本质",
+			"",
+			"教育具有目的性、社会性和历史性，需要单独拆成可复习知识点。",
+			"",
+			"## 教育制度",
+			"",
+			"教育制度包括学校教育制度、管理制度和评价制度。",
+		}, "\n"),
+	}
+
+	chunks := chunkDocument(doc, policy)
+	if len(chunks) < 3 {
+		t.Fatalf("expected heading-based chunks, got %d", len(chunks))
+	}
+	if chunks[0].HeadingPath != "第一章 教育与教育学" {
+		t.Fatalf("unexpected first heading path: %q", chunks[0].HeadingPath)
+	}
+	if chunks[1].HeadingPath != "第一章 教育与教育学 / 教育的本质" {
+		t.Fatalf("unexpected nested heading path: %q", chunks[1].HeadingPath)
+	}
+	if chunks[1].SourceLocation != "第一章 教育与教育学 / 教育的本质" {
+		t.Fatalf("expected heading path as source location, got %q", chunks[1].SourceLocation)
+	}
+}
+
+func TestRewriteSplitReturnsMultipleAtomicCandidates(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.RewriteCardWithAI(model.AIRewriteCardRequest{
+		Title:       "教育目的和教育制度",
+		Content:     composeCardContent("教育目的和教育制度分别是什么？", "教育目的是教育活动预期培养人的质量规格；教育制度是规范教育活动组织运行的制度体系。"),
+		RewriteType: "split",
+		Instruction: "拆成两张原子卡，每张只考一个概念。",
+	})
+
+	if len(response.Candidates) < 2 {
+		t.Fatalf("expected split rewrite to return multiple candidates, got %d", len(response.Candidates))
+	}
+	for _, candidate := range response.Candidates {
+		if candidate.Title == "" || candidate.Content == "" {
+			t.Fatalf("expected complete candidate, got %+v", candidate)
+		}
+	}
+}
+
+func TestNormalizeRewriteCandidateConvertsQuestionDsl(t *testing.T) {
+	candidate := model.AIRewriteCandidate{
+		Title: "教育原则中的教育目标",
+		Content: strings.Join([]string{
+			"@question",
+			"在教育原则中，“教育目标”的含义是什么？",
+			"@end",
+			"教育目标指导学习者的发展。",
+		}, "\n"),
+	}
+
+	normalized := normalizeRewriteCandidate(candidate)
+	prompt, answer := splitCardContent(normalized.Content)
+
+	if strings.Contains(prompt, "@question") || strings.Contains(prompt, "@end") {
+		t.Fatalf("expected question DSL markers to be removed, got %q", prompt)
+	}
+	if prompt != "在教育原则中，“教育目标”的含义是什么？" {
+		t.Fatalf("unexpected prompt: %q", prompt)
+	}
+	if answer != "教育目标指导学习者的发展。" {
+		t.Fatalf("unexpected answer: %q", answer)
+	}
+}
+
+func TestRewriteCardsWithAIBatchPreservesCardOrder(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.RewriteCardsWithAI(model.AIRewriteBatchRequest{
+		RewriteType: "simplify_answer",
+		Instruction: "答案压缩成一句话",
+		Policy:      &model.GenerationPolicy{Name: "批量整理", MaxAnswerChars: 20},
+		Cards: []model.AIRewriteCardRequest{
+			{
+				CardID:  "card-1",
+				Title:   "教育目的",
+				Content: composeCardContent("教育目的是什么？", "教育目的是教育活动预期培养人的质量规格，体现社会要求和个体发展需要。"),
+			},
+			{
+				CardID:  "card-2",
+				Title:   "教育制度",
+				Content: composeCardContent("教育制度是什么？", "教育制度是规范教育活动组织运行的制度体系。"),
+			},
+		},
+	})
+
+	if len(response.Results) != 2 {
+		t.Fatalf("expected two batch rewrite results, got %d", len(response.Results))
+	}
+	if response.Results[0].CardID != "card-1" || len(response.Results[0].Candidates) == 0 {
+		t.Fatalf("unexpected first batch result: %+v", response.Results[0])
+	}
+	if response.Results[1].CardID != "card-2" || len(response.Results[1].Candidates) == 0 {
+		t.Fatalf("unexpected second batch result: %+v", response.Results[1])
+	}
+}
+
+func TestChatCardsWithAIGeneratesDraftsFromConversation(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.ChatCardsWithAI(model.AICardChatRequest{
+		Topic:       "教育学原理",
+		Instruction: "帮我做 3 张形成性评价的考试型卡片，选择题多一点。",
+		CardCount:   3,
+		Difficulty:  "medium",
+		Messages: []model.AICardChatMessage{
+			{Role: "user", Content: "希望答案短一点，适合背诵。"},
+		},
+		Policy: &model.GenerationPolicy{
+			PreferredCardTypes: []string{"single_choice", "basic"},
+			MaxAnswerChars:     60,
+		},
+	})
+
+	if len(response.Items) != 3 {
+		t.Fatalf("expected 3 generated chat drafts, got %d", len(response.Items))
+	}
+	if response.AssistantMessage == "" {
+		t.Fatal("expected assistant message")
+	}
+	if !strings.Contains(response.Items[0].Content, "{single-choice}") {
+		t.Fatalf("expected chat generation to preserve requested card type DSL, got %q", response.Items[0].Content)
+	}
+}
+
+func TestChatCardsWithAIRefinesReferencedCardOnly(t *testing.T) {
+	service := newTestAppService(t)
+	items := []model.AIGeneratedCard{
+		{
+			Title:    "教育目的",
+			Content:  composeCardContent("教育目的是什么？", "规定人才培养方向。"),
+			CardType: "basic",
+			Tags:     []string{"AI生成"},
+		},
+		{
+			Title:    "教育制度",
+			Content:  composeCardContent("教育制度是什么？", "教育活动组织运行的制度体系。"),
+			CardType: "basic",
+			Tags:     []string{"AI生成"},
+		},
+	}
+
+	response := service.ChatCardsWithAI(model.AICardChatRequest{
+		Topic:       "教育学原理",
+		Instruction: "把答案改得更口语，但不要改题干。",
+		Items:       items,
+		Reference: &model.AICardReference{
+			CardIndex: 1,
+			Part:      "answer",
+		},
+	})
+
+	if response.UpdatedIndex == nil || *response.UpdatedIndex != 1 {
+		t.Fatalf("expected updated index 1, got %+v", response.UpdatedIndex)
+	}
+	if len(response.Items) != 2 {
+		t.Fatalf("expected two cards after refinement, got %d", len(response.Items))
+	}
+	if response.Items[0].Content != items[0].Content {
+		t.Fatalf("expected unreferenced card to remain unchanged")
+	}
+	if response.Items[1].Content == items[1].Content {
+		t.Fatalf("expected referenced card to be refined")
+	}
+}
+
+func TestCreateAIGenerationJobPersistsSucceededResult(t *testing.T) {
+	service := newTestAppService(t)
+	user := registerTestUser(t, service, "ai-job@example.com")
+
+	job, err := service.CreateAIGenerationJob(user.ID, model.AIGenerateRequest{
+		Topic:      "教育学原理",
+		Context:    "教育目的规定教育活动要培养什么样的人。",
+		CardCount:  2,
+		Difficulty: "medium",
+	})
+	if err != nil {
+		t.Fatalf("create generation job: %v", err)
+	}
+	if job.ID == "" || job.Status != "succeeded" || job.Progress != 1 {
+		t.Fatalf("unexpected job state: %+v", job)
+	}
+	if job.Result == nil || len(job.Result.Items) == 0 {
+		t.Fatalf("expected generated result on job, got %+v", job)
+	}
+
+	persisted, err := service.GetAIGenerationJob(user.ID, job.ID)
+	if err != nil {
+		t.Fatalf("get generation job: %v", err)
+	}
+	if persisted.Result == nil || len(persisted.Result.Items) == 0 {
+		t.Fatalf("expected persisted result, got %+v", persisted)
 	}
 }

@@ -16,11 +16,37 @@ type openAIChatRequest struct {
 	Model       string              `json:"model"`
 	Messages    []openAIChatMessage `json:"messages"`
 	Temperature float64             `json:"temperature"`
+	Tools       []openAIChatTool    `json:"tools,omitempty"`
+	ToolChoice  string              `json:"tool_choice,omitempty"`
 }
 
 type openAIChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
+type openAIToolCall struct {
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function openAIToolFunction `json:"function"`
+}
+
+type openAIToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type openAIChatTool struct {
+	Type     string             `json:"type"`
+	Function openAIFunctionSpec `json:"function"`
+}
+
+type openAIFunctionSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 type openAIChatResponse struct {
@@ -35,62 +61,55 @@ func (s *AppService) tryGenerateCardsWithExternalAI(request model.AIGenerateRequ
 	}
 
 	prompt := buildAIPrompt(request)
-	payload := openAIChatRequest{
-		Model: s.config.AIModel,
-		Messages: []openAIChatMessage{
-			{
-				Role:    "system",
-				Content: "You generate high-quality flashcards for a spaced repetition app. Return JSON only in the format {\"items\":[{\"title\":\"...\",\"content\":\"Card DSL...\",\"front\":\"...\",\"back\":\"...\",\"card_type\":\"basic|single_choice|multi_choice|cloze\",\"knowledge_point\":\"...\",\"source_excerpt\":\"...\",\"tags\":[\"...\"],\"note\":\"...\"}]} without markdown fences.",
-			},
-			{
-				Role:    "user",
-				Content: prompt,
-			},
-		},
+	runtime := newAIAgentRuntime(aiAgentRuntimeConfig{
+		Model:       s.config.AIModel,
+		MaxTurns:    4,
 		Temperature: 0.7,
+		ToolChoice:  "auto",
+		Tools:       newAICardGenerationToolRegistry(),
+		Chat:        s.createAIChatCompletion,
+		Evaluator:   aiCardGenerationEvaluator{},
+	})
+	result, err := runtime.Run(aiAgentRunInput{
+		SystemPrompt: "You are a flashcard generation agent. Prefer calling the provided card creation tools for every card, then return JSON only in the format {\"items\":[...cards...]} without markdown fences. All choice cards must use the app's implemented Card DSL.",
+		UserPrompt:   prompt,
+		Context: aiAgentToolContext{
+			GenerateRequest: request,
+		},
+	})
+	if err != nil {
+		return nil, err
 	}
+	return normalizeGeneratedCards(result.Cards), nil
+}
 
+func (s *AppService) createAIChatCompletion(payload openAIChatRequest) (openAIChatResponse, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return openAIChatResponse{}, err
 	}
-
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(s.config.AIBaseURL, "/")+"/chat/completions", bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return openAIChatResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.config.AIAPIKey)
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: 90 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return openAIChatResponse{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("external ai returned status %d", resp.StatusCode)
+		return openAIChatResponse{}, fmt.Errorf("external ai returned status %d", resp.StatusCode)
 	}
 
 	var chatResp openAIChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return nil, err
+		return openAIChatResponse{}, err
 	}
-	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("external ai returned no choices")
-	}
-
-	content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
-
-	var generated model.AIGenerateResponse
-	if err := json.Unmarshal([]byte(content), &generated); err != nil {
-		return nil, err
-	}
-	return normalizeGeneratedCards(generated.Items), nil
+	return chatResp, nil
 }
 
 func buildAIPrompt(request model.AIGenerateRequest) string {
@@ -98,7 +117,8 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 	if cardCount <= 0 {
 		cardCount = 3
 	}
-	cardTypes := strings.Join(request.CardTypes, ", ")
+	policy := effectiveGenerationPolicy(request)
+	cardTypes := strings.Join(policy.PreferredCardTypes, ", ")
 	if strings.TrimSpace(cardTypes) == "" {
 		cardTypes = "basic, single_choice, multi_choice, cloze"
 	}
@@ -107,7 +127,7 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 		strategy = "fsrs_friendly"
 	}
 	return fmt.Sprintf(
-		"Topic: %s\nSourceName: %s\nContext: %s\nDifficulty: %s\nCardCount: %d\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\nRules: one card tests one atomic knowledge point; answers must be short and self-checkable; cloze blanks should hide short key terms only; choice distractors must be plausible; do not make broad essay cards; prefer Card DSL content with @answer blocks when useful.",
+		"Topic: %s\nSourceName: %s\nContext: %s\nDifficulty: %s\nCardCount: %d\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\n%s\n%s",
 		strings.TrimSpace(request.Topic),
 		strings.TrimSpace(request.SourceName),
 		strings.TrimSpace(request.Context),
@@ -115,7 +135,230 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 		cardCount,
 		cardTypes,
 		strategy,
+		policyPromptRules(policy),
+		cardDSLPromptRules(),
 	)
+}
+
+func cardDSLPromptRules() string {
+	return strings.Join([]string{
+		"CardDSLRules:",
+		"- basic/cloze cards may use normal prompt plus @answer ... @end.",
+		"- single_choice must use exactly this implemented DSL block: {single-choice}\\nQ: 题干\\n* 正确选项\\n- 干扰项\\n- 干扰项\\n{/single-choice}.",
+		"- multi_choice must use exactly this implemented DSL block: {multi-choice}\\nQ: 题干\\n* 正确选项\\n* 正确选项\\n- 干扰项\\n{/multi-choice}.",
+		"- Do not write choice cards as ordinary A/B/C/D text. 不要把选择题写成 A/B/C/D 普通文本.",
+		"- Put explanation or source note in @answer ... @end, not as the selectable option list.",
+	}, "\n")
+}
+
+func stripJSONFence(content string) string {
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	return strings.TrimSpace(content)
+}
+
+func newAICardGenerationToolRegistry() *aiAgentToolRegistry {
+	registry := newAIAgentToolRegistry()
+	for _, tool := range []aiAgentTool{
+		newAICardGenerationTool(
+			"create_basic_card",
+			"Create one atomic basic flashcard with a short self-checkable answer.",
+			[]string{"title", "question", "answer"},
+		),
+		newAICardGenerationTool(
+			"create_cloze_card",
+			"Create one cloze flashcard. The question should contain {{...}} blanks around short key terms.",
+			[]string{"title", "question", "answer"},
+		),
+		newAICardGenerationTool(
+			"create_single_choice_card",
+			"Create one single-choice flashcard. The service will convert arguments into implemented Card DSL.",
+			[]string{"title", "question", "correct_answer", "distractors"},
+		),
+		newAICardGenerationTool(
+			"create_multi_choice_card",
+			"Create one multi-choice flashcard. The service will convert arguments into implemented Card DSL.",
+			[]string{"title", "question", "correct_options", "distractors"},
+		),
+	} {
+		_ = registry.Register(tool)
+	}
+	return registry
+}
+
+func newAICardGenerationTool(name, description string, required []string) aiAgentTool {
+	return aiAgentTool{
+		Name: name,
+		Spec: aiCardGenerationTool(
+			name,
+			description,
+			required,
+		),
+		Execute: func(ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
+			return executeAICardGenerationTool(name, ctx, arguments)
+		},
+	}
+}
+
+func aiCardGenerationTool(name, description string, required []string) openAIChatTool {
+	properties := map[string]any{
+		"title": map[string]any{
+			"type":        "string",
+			"description": "Short user-facing card title.",
+		},
+		"question": map[string]any{
+			"type":        "string",
+			"description": "The card prompt. It must test one atomic knowledge point.",
+		},
+		"answer": map[string]any{
+			"type":        "string",
+			"description": "Short answer, explanation, or self-check rubric.",
+		},
+		"correct_answer": map[string]any{
+			"type":        "string",
+			"description": "The only correct option for single-choice cards.",
+		},
+		"correct_options": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "string",
+			},
+			"description": "All correct options for multi-choice cards.",
+		},
+		"distractors": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "string",
+			},
+			"description": "Plausible but incorrect options.",
+		},
+		"knowledge_point": map[string]any{"type": "string"},
+		"source_excerpt":  map[string]any{"type": "string"},
+		"source_location": map[string]any{"type": "string"},
+		"tags": map[string]any{
+			"type":  "array",
+			"items": map[string]any{"type": "string"},
+		},
+		"note": map[string]any{"type": "string"},
+	}
+	return openAIChatTool{
+		Type: "function",
+		Function: openAIFunctionSpec{
+			Name:        name,
+			Description: description,
+			Parameters: map[string]any{
+				"type":                 "object",
+				"properties":           properties,
+				"required":             required,
+				"additionalProperties": false,
+			},
+		},
+	}
+}
+
+type aiCardToolArgs struct {
+	Title          string   `json:"title"`
+	Question       string   `json:"question"`
+	Answer         string   `json:"answer"`
+	CorrectAnswer  string   `json:"correct_answer"`
+	CorrectOptions []string `json:"correct_options"`
+	Distractors    []string `json:"distractors"`
+	KnowledgePoint string   `json:"knowledge_point"`
+	SourceExcerpt  string   `json:"source_excerpt"`
+	SourceLocation string   `json:"source_location"`
+	Tags           []string `json:"tags"`
+	Note           string   `json:"note"`
+}
+
+func executeAICardGenerationTool(toolName string, ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
+	var args aiCardToolArgs
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return aiAgentToolResult{}, err
+	}
+
+	cardType := "basic"
+	content := ""
+	answer := strings.TrimSpace(args.Answer)
+	question := strings.TrimSpace(args.Question)
+	switch toolName {
+	case "create_basic_card":
+		cardType = "basic"
+		content = composeCardContent(question, answer)
+	case "create_cloze_card":
+		cardType = "cloze"
+		content = composeCardContent(question, answer)
+	case "create_single_choice_card":
+		cardType = "single_choice"
+		correct := firstNonEmpty(args.CorrectAnswer, firstString(args.CorrectOptions), answer)
+		content = composeSingleChoiceCardContent(question, correct, args.Distractors, firstNonEmpty(answer, correct))
+	case "create_multi_choice_card":
+		cardType = "multi_choice"
+		correct := compactStrings(args.CorrectOptions)
+		if len(correct) == 0 && strings.TrimSpace(args.CorrectAnswer) != "" {
+			correct = []string{strings.TrimSpace(args.CorrectAnswer)}
+		}
+		content = composeMultiChoiceCardContent(question, correct, args.Distractors, firstNonEmpty(answer, strings.Join(correct, "；")))
+	default:
+		return aiAgentToolResult{}, fmt.Errorf("unknown card generation tool: %s", toolName)
+	}
+	card := completeAIGeneratedToolCard(model.AIGeneratedCard{
+		Title:          strings.TrimSpace(args.Title),
+		Content:        content,
+		CardType:       cardType,
+		KnowledgePoint: strings.TrimSpace(args.KnowledgePoint),
+		SourceExcerpt:  strings.TrimSpace(args.SourceExcerpt),
+		SourceLocation: strings.TrimSpace(args.SourceLocation),
+		Tags:           compactStrings(args.Tags),
+		Note:           strings.TrimSpace(args.Note),
+	}, ctx.GenerateRequest)
+	return aiAgentToolResult{
+		Content: toolResultJSON(map[string]any{"ok": true, "card": card}),
+		Cards:   []model.AIGeneratedCard{card},
+	}, nil
+}
+
+func completeAIGeneratedToolCard(card model.AIGeneratedCard, request model.AIGenerateRequest) model.AIGeneratedCard {
+	prompt, answer := splitCardContent(card.Content)
+	if card.Title == "" {
+		card.Title = firstNonEmpty(firstLine(prompt), strings.TrimSpace(request.Topic))
+	}
+	card.Front = prompt
+	card.Back = answer
+	if card.KnowledgePoint == "" {
+		card.KnowledgePoint = strings.TrimSpace(request.Topic)
+	}
+	if card.SourceLocation == "" {
+		card.SourceLocation = strings.TrimSpace(request.SourceName)
+	}
+	if card.SourceExcerpt == "" {
+		card.SourceExcerpt = previewText(request.Context, 160)
+	}
+	if card.Difficulty == "" {
+		card.Difficulty = strings.TrimSpace(request.Difficulty)
+	}
+	if len(card.Tags) == 0 {
+		card.Tags = compactStrings([]string{"AI生成", request.Topic, request.Difficulty})
+	}
+	return card
+}
+
+func toolResultJSON(value map[string]any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return `{"ok":false,"error":"tool result marshal failed"}`
+	}
+	return string(data)
+}
+
+func firstString(values []string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *AppService) tryRewriteCardWithExternalAI(request model.AIRewriteCardRequest) ([]model.AIRewriteCandidate, error) {
@@ -154,7 +397,7 @@ func (s *AppService) tryRewriteCardWithExternalAI(request model.AIRewriteCardReq
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.config.AIAPIKey)
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: 90 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -182,11 +425,73 @@ func (s *AppService) tryRewriteCardWithExternalAI(request model.AIRewriteCardReq
 		return nil, err
 	}
 	for i := range rewritten.Candidates {
-		if strings.TrimSpace(rewritten.Candidates[i].Content) == "" {
-			rewritten.Candidates[i].Content = composeCardContent(rewritten.Candidates[i].Title, "")
-		}
+		rewritten.Candidates[i] = normalizeRewriteCandidate(rewritten.Candidates[i])
 	}
 	return rewritten.Candidates, nil
+}
+
+func normalizeRewriteCandidate(candidate model.AIRewriteCandidate) model.AIRewriteCandidate {
+	candidate.Title = strings.TrimSpace(candidate.Title)
+	candidate.Content = strings.TrimSpace(candidate.Content)
+	if candidate.Content == "" {
+		candidate.Content = composeCardContent(candidate.Title, "")
+		return candidate
+	}
+
+	prompt, answer := splitCardContent(candidate.Content)
+	if !strings.Contains(candidate.Content, "@question") && strings.TrimSpace(prompt) != "" {
+		candidate.Content = composeCardContent(prompt, answer)
+		if candidate.Title == "" {
+			candidate.Title = firstLine(prompt)
+		}
+		return candidate
+	}
+
+	if question, questionAnswer, ok := splitQuestionDslContent(candidate.Content); ok {
+		candidate.Content = composeCardContent(question, questionAnswer)
+		if candidate.Title == "" {
+			candidate.Title = firstLine(question)
+		}
+		return candidate
+	}
+
+	candidate.Content = composeCardContent(firstNonEmpty(prompt, candidate.Title), answer)
+	return candidate
+}
+
+func splitQuestionDslContent(content string) (string, string, bool) {
+	lines := strings.Split(content, "\n")
+	questionLines := make([]string, 0)
+	answerLines := make([]string, 0)
+	inQuestion := false
+	sawQuestion := false
+	questionClosed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inQuestion && trimmed == "@question" {
+			inQuestion = true
+			sawQuestion = true
+			continue
+		}
+		if inQuestion && trimmed == "@end" {
+			inQuestion = false
+			questionClosed = true
+			continue
+		}
+		if inQuestion {
+			questionLines = append(questionLines, line)
+			continue
+		}
+		if questionClosed {
+			if trimmed == "@answer" || trimmed == "@end" {
+				continue
+			}
+			answerLines = append(answerLines, line)
+		}
+	}
+	question := strings.TrimSpace(strings.Join(questionLines, "\n"))
+	answer := strings.TrimSpace(strings.Join(answerLines, "\n"))
+	return question, answer, sawQuestion && question != ""
 }
 
 func normalizeGeneratedCards(items []model.AIGeneratedCard) []model.AIGeneratedCard {

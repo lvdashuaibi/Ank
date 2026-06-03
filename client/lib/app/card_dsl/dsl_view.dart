@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:io' show File;
 
 import 'package:audioplayers/audioplayers.dart';
@@ -7,6 +8,9 @@ import 'package:flutter_math_fork/flutter_math.dart';
 
 import 'dsl_ast.dart';
 import 'dsl_parser.dart';
+
+@visibleForTesting
+Random? debugDslChoiceShuffleRandom;
 
 class DslCardView extends StatefulWidget {
   const DslCardView({
@@ -1122,6 +1126,38 @@ class _DslChoiceGroupStateful extends StatefulWidget {
 class _DslChoiceGroupStatefulState extends State<_DslChoiceGroupStateful> {
   int? _singleSelected;
   final Set<int> _multiSelected = <int>{};
+  late List<int> _optionOrder;
+  late String _optionFingerprint;
+
+  @override
+  void initState() {
+    super.initState();
+    _reshuffleOptions();
+  }
+
+  @override
+  void didUpdateWidget(_DslChoiceGroupStateful oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final String nextFingerprint = _fingerprintOptions(widget.options);
+    if (nextFingerprint != _optionFingerprint ||
+        oldWidget.multiSelect != widget.multiSelect) {
+      _singleSelected = null;
+      _multiSelected.clear();
+      _reshuffleOptions();
+    }
+  }
+
+  void _reshuffleOptions() {
+    _optionFingerprint = _fingerprintOptions(widget.options);
+    _optionOrder = List<int>.generate(widget.options.length, (int i) => i);
+    if (_optionOrder.length > 1) {
+      _optionOrder.shuffle(debugDslChoiceShuffleRandom ?? Random());
+    }
+  }
+
+  String _fingerprintOptions(List<DslChoiceOption> options) => options
+      .map((DslChoiceOption option) => '${option.isCorrect}:${option.content}')
+      .join('\u001f');
 
   @override
   Widget build(BuildContext context) {
@@ -1138,17 +1174,17 @@ class _DslChoiceGroupStatefulState extends State<_DslChoiceGroupStateful> {
           children: <Widget>[
             Text('单选题', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
-            for (int i = 0; i < widget.options.length; i++)
+            for (final int optionIndex in _optionOrder)
               RadioListTile<int>(
-                value: i,
+                value: optionIndex,
                 enabled: widget.allowInteraction,
-                title: Text(_plainInline(widget.options[i].content)),
+                title: Text(_plainInline(widget.options[optionIndex].content)),
                 secondary: widget.showResults
                     ? Icon(
-                        widget.options[i].isCorrect
+                        widget.options[optionIndex].isCorrect
                             ? Icons.check_circle_outline
                             : Icons.cancel_outlined,
-                        color: widget.options[i].isCorrect
+                        color: widget.options[optionIndex].isCorrect
                             ? Colors.green
                             : Colors.red,
                       )
@@ -1164,25 +1200,25 @@ class _DslChoiceGroupStatefulState extends State<_DslChoiceGroupStateful> {
       children: <Widget>[
         Text('多选题', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
-        for (int i = 0; i < widget.options.length; i++)
+        for (final int optionIndex in _optionOrder)
           CheckboxListTile(
-            value: _multiSelected.contains(i),
+            value: _multiSelected.contains(optionIndex),
             onChanged: widget.allowInteraction
                 ? (_) => setState(() {
-                    if (_multiSelected.contains(i)) {
-                      _multiSelected.remove(i);
+                    if (_multiSelected.contains(optionIndex)) {
+                      _multiSelected.remove(optionIndex);
                     } else {
-                      _multiSelected.add(i);
+                      _multiSelected.add(optionIndex);
                     }
                   })
                 : null,
-            title: Text(_plainInline(widget.options[i].content)),
+            title: Text(_plainInline(widget.options[optionIndex].content)),
             secondary: widget.showResults
                 ? Icon(
-                    widget.options[i].isCorrect
+                    widget.options[optionIndex].isCorrect
                         ? Icons.check_circle_outline
                         : Icons.cancel_outlined,
-                    color: widget.options[i].isCorrect
+                    color: widget.options[optionIndex].isCorrect
                         ? Colors.green
                         : Colors.red,
                   )

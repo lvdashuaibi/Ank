@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flashcard_app/app/card_dsl/dsl_ast.dart';
 import 'package:flashcard_app/app/card_dsl/dsl_parser.dart';
 import 'package:flashcard_app/app/card_dsl/dsl_plaintext.dart';
@@ -91,6 +93,41 @@ Q: 哪些属于传输层协议？
 
     expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
     expect(find.byIcon(Icons.cancel_outlined), findsOneWidget);
+  });
+
+  testWidgets('DslCardView shuffles single-choice options for each review', (
+    WidgetTester tester,
+  ) async {
+    debugDslChoiceShuffleRandom = Random(4);
+    addTearDown(() => debugDslChoiceShuffleRandom = null);
+
+    const String shuffleDsl = '''{single-choice}
+Q: 哪个说法正确？
+* A
+- B
+- C
+- D
+{/single-choice}''';
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: DslCardView(
+            front: shuffleDsl,
+            back: '',
+            revealed: false,
+            onReveal: _noop,
+          ),
+        ),
+      ),
+    );
+
+    final List<double> optionTops = <String>['A', 'B', 'C', 'D']
+        .map((String option) => tester.getTopLeft(find.text(option)).dy)
+        .toList();
+    final List<double> originalOrderTops = <double>[...optionTops]..sort();
+
+    expect(optionTops, isNot(orderedEquals(originalOrderTops)));
   });
 
   testWidgets('DslCardView renders custom multi-choice block in review', (

@@ -67,6 +67,28 @@ class _DeckListTestStore extends AppStore {
   Future<void> bootstrap() async {}
 }
 
+class _EmptyDeckListTestStore extends AppStore {
+  _EmptyDeckListTestStore() : super() {
+    state = const AppState(
+      decks: <DeckModel>[],
+      cards: <CardModel>[],
+      completedToday: 0,
+      reviewedReviewTodayByDeck: <String, int>{},
+      introducedNewTodayByDeck: <String, int>{},
+      isBootstrapping: false,
+      syncInProgress: false,
+      pendingOperations: <SyncOperation>[],
+      generatedCards: <AIGeneratedCard>[],
+      accessToken: 'test-token',
+      email: 'test@example.com',
+      displayName: 'tester',
+    );
+  }
+
+  @override
+  Future<void> bootstrap() async {}
+}
+
 void main() {
   setUpAll(() {
     sqfliteFfiInit();
@@ -100,5 +122,30 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('算法题'), findsOneWidget);
+  });
+
+  testWidgets('deck list shows empty state for authenticated empty account', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    appRouter.go('/');
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: <Override>[
+          appStoreProvider.overrideWith((Ref ref) => _EmptyDeckListTestStore()),
+        ],
+        child: const FlashcardApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Ank 学习空间'), findsOneWidget);
+    expect(find.text('还没有可用牌组'), findsOneWidget);
+    expect(find.text('创建文件夹'), findsOneWidget);
   });
 }

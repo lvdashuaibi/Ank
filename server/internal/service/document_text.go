@@ -2,9 +2,11 @@ package service
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"path/filepath"
 	"regexp"
@@ -13,7 +15,7 @@ import (
 	"unicode/utf8"
 )
 
-const maxAIImportBytes = 8 * 1024 * 1024
+const maxAIImportBytes = 50 * 1024 * 1024
 
 var (
 	errUnsupportedDocument = errors.New("unsupported document type")
@@ -27,6 +29,14 @@ type extractedDocument struct {
 	TextPreview string
 	TextLength  int
 	PageCount   int
+	ImageCount  int
+	Images      []extractedImage
+}
+
+type extractedImage struct {
+	Alt      string
+	Source   string
+	IsRemote bool
 }
 
 func extractDocumentFromUpload(header *multipart.FileHeader) (extractedDocument, error) {
@@ -63,16 +73,21 @@ func extractDocumentText(filename, mimeType string, data []byte) (extractedDocum
 	var (
 		text      string
 		pageCount int
+		images    []extractedImage
 		err       error
 	)
 	switch ext {
-	case ".txt", ".md", ".markdown":
+	case ".txt":
 		text, err = extractPlainText(data)
+	case ".md", ".markdown":
+		text, images, err = extractMarkdownText(data)
 	case ".pdf":
 		text, pageCount, err = extractPDFText(data)
 	default:
 		if strings.Contains(mimeType, "pdf") {
 			text, pageCount, err = extractPDFText(data)
+		} else if strings.Contains(mimeType, "markdown") {
+			text, images, err = extractMarkdownText(data)
 		} else if strings.HasPrefix(mimeType, "text/") {
 			text, err = extractPlainText(data)
 		} else {
@@ -93,6 +108,8 @@ func extractDocumentText(filename, mimeType string, data []byte) (extractedDocum
 		TextPreview: previewText(text, 420),
 		TextLength:  utf8.RuneCountInString(text),
 		PageCount:   pageCount,
+		ImageCount:  len(images),
+		Images:      images,
 	}, nil
 }
 
@@ -103,6 +120,65 @@ func extractPlainText(data []byte) (string, error) {
 	return string(data), nil
 }
 
+func extractMarkdownText(data []byte) (string, []extractedImage, error) {
+	text, err := extractPlainText(data)
+	if err != nil {
+		return "", nil, err
+	}
+	images := extractMarkdownImages(text)
+	text = replaceMarkdownImagesWithPlaceholders(text, images)
+	return text, images, nil
+}
+
+var markdownImageRe = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
+
+func extractMarkdownImages(text string) []extractedImage {
+	matches := markdownImageRe.FindAllStringSubmatch(text, -1)
+	images := make([]extractedImage, 0, len(matches))
+	for _, match := range matches {
+		source := strings.TrimSpace(match[2])
+		if source == "" {
+			continue
+		}
+		images = append(images, extractedImage{
+			Alt:      strings.TrimSpace(match[1]),
+			Source:   source,
+			IsRemote: isRemoteImageSource(source),
+		})
+	}
+	return images
+}
+
+func replaceMarkdownImagesWithPlaceholders(text string, images []extractedImage) string {
+	if len(images) == 0 {
+		return text
+	}
+	index := 0
+	return markdownImageRe.ReplaceAllStringFunc(text, func(raw string) string {
+		if index >= len(images) {
+			return raw
+		}
+		image := images[index]
+		index++
+		label := image.Alt
+		if label == "" {
+			label = filepath.Base(image.Source)
+		}
+		scope := "本地引用"
+		if image.IsRemote {
+			scope = "远程引用"
+		}
+		return fmt.Sprintf("[图片: %s；%s: %s；请根据正文、图注或周边解释生成卡片，当前版本不会自动 OCR 图片内容]", label, scope, image.Source)
+	})
+}
+
+func isRemoteImageSource(source string) bool {
+	lower := strings.ToLower(strings.TrimSpace(source))
+	return strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "data:image/")
+}
+
 func extractPDFText(data []byte) (string, int, error) {
 	if !bytes.HasPrefix(bytes.TrimSpace(data), []byte("%PDF")) {
 		return "", 0, fmt.Errorf("invalid PDF file")
@@ -111,8 +187,33 @@ func extractPDFText(data []byte) (string, int, error) {
 	pageCount := regexp.MustCompile(`/Type\s*/Page\b`).FindAllStringIndex(raw, -1)
 
 	var parts []string
+	for _, source := range append([]string{raw}, extractFlatePDFStreams(data)...) {
+		parts = appendPDFTextParts(parts, source)
+	}
+
+	text := normalizeExtractedText(strings.Join(parts, "\n"))
+	if text == "" {
+		return "", len(pageCount), fmt.Errorf("PDF does not contain selectable text; scanned PDFs need OCR")
+	}
+	return text, len(pageCount), nil
+}
+
+func appendPDFTextParts(parts []string, raw string) []string {
+	arrayRe := regexp.MustCompile(`(?s)\[((?:\\.|[^\]])+)\]\s*TJ`)
+	rawWithoutArrays := arrayRe.ReplaceAllStringFunc(raw, func(match string) string {
+		submatches := arrayRe.FindStringSubmatch(match)
+		if len(submatches) < 2 {
+			return " "
+		}
+		text := extractPDFTextArray(submatches[1])
+		if isUsefulPDFText(text) {
+			parts = append(parts, text)
+		}
+		return " "
+	})
+
 	literalRe := regexp.MustCompile(`\((?:\\.|[^\\)]){2,}\)`)
-	for _, match := range literalRe.FindAllString(raw, -1) {
+	for _, match := range literalRe.FindAllString(rawWithoutArrays, -1) {
 		text := decodePDFLiteralString(match[1 : len(match)-1])
 		if isUsefulPDFText(text) {
 			parts = append(parts, text)
@@ -127,11 +228,68 @@ func extractPDFText(data []byte) (string, int, error) {
 		}
 	}
 
-	text := normalizeExtractedText(strings.Join(parts, "\n"))
-	if text == "" {
-		return "", len(pageCount), fmt.Errorf("PDF does not contain selectable text; scanned PDFs need OCR")
+	return parts
+}
+
+func extractFlatePDFStreams(data []byte) []string {
+	streamRe := regexp.MustCompile(`(?s)<<[^>]*?/Filter\s*/FlateDecode[^>]*?>>\s*stream\r?\n(.*?)\r?\nendstream`)
+	matches := streamRe.FindAllSubmatch(data, -1)
+	streams := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		reader, err := zlib.NewReader(bytes.NewReader(match[1]))
+		if err != nil {
+			continue
+		}
+		extracted, err := io.ReadAll(io.LimitReader(reader, int64(maxAIImportBytes*4)))
+		closeErr := reader.Close()
+		if err != nil || closeErr != nil {
+			continue
+		}
+		if len(bytes.TrimSpace(extracted)) > 0 {
+			streams = append(streams, string(extracted))
+		}
 	}
-	return text, len(pageCount), nil
+	return streams
+}
+
+func extractPDFTextArray(input string) string {
+	literalRe := regexp.MustCompile(`\((?:\\.|[^\\)])*\)`)
+	segments := make([]string, 0)
+	for _, match := range literalRe.FindAllString(input, -1) {
+		text := strings.TrimSpace(decodePDFLiteralString(match[1 : len(match)-1]))
+		if text != "" {
+			segments = append(segments, text)
+		}
+	}
+	var builder strings.Builder
+	for _, segment := range segments {
+		if builder.Len() > 0 && needsJoinSpace(builder.String(), segment) {
+			builder.WriteByte(' ')
+		}
+		builder.WriteString(segment)
+	}
+	return builder.String()
+}
+
+func needsJoinSpace(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	leftRune := []rune(left)[len([]rune(left))-1]
+	rightRune := []rune(right)[0]
+	return isWordishRune(leftRune) && isWordishRune(rightRune)
+}
+
+func isWordishRune(r rune) bool {
+	return r > 127 ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= '0' && r <= '9')
 }
 
 func decodePDFLiteralString(input string) string {

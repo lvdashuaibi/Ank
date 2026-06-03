@@ -1,18 +1,25 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 
 class ApiClient {
-  ApiClient()
-    : _dio = Dio(
-        BaseOptions(
-          baseUrl: const String.fromEnvironment(
-            'API_BASE_URL',
-            defaultValue: 'http://127.0.0.1:8080/api/v1',
-          ),
-          connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 10),
-          headers: <String, String>{'Content-Type': 'application/json'},
+  ApiClient({Dio? dio}) : _dio = dio ?? _createDefaultDio();
+
+  static const Duration aiReceiveTimeout = Duration(seconds: 90);
+
+  static Dio _createDefaultDio() {
+    return Dio(
+      BaseOptions(
+        baseUrl: const String.fromEnvironment(
+          'API_BASE_URL',
+          defaultValue: 'http://8.135.61.137:8080/api/v1',
         ),
-      );
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: <String, String>{'Content-Type': 'application/json'},
+      ),
+    );
+  }
 
   final Dio _dio;
 
@@ -266,18 +273,21 @@ class ApiClient {
     required String context,
     required int cardCount,
     required String difficulty,
+    Map<String, dynamic>? policy,
   }) async {
+    final Map<String, dynamic> payload = <String, dynamic>{
+      'topic': topic,
+      'context': context,
+      'card_count': cardCount,
+      'difficulty': difficulty,
+    };
+    if (policy != null) {
+      payload['policy'] = policy;
+    }
     final Response<dynamic> response = await _dio.post<dynamic>(
       '/ai/generate',
-      data: <String, dynamic>{
-        'topic': topic,
-        'context': context,
-        'card_count': cardCount,
-        'difficulty': difficulty,
-      },
-      options: Options(
-        headers: <String, String>{'Authorization': 'Bearer $token'},
-      ),
+      data: payload,
+      options: _aiOptions(token),
     );
     return _toMapList(response.data, 'items');
   }
@@ -290,6 +300,7 @@ class ApiClient {
     required int cardCount,
     required String difficulty,
     required List<String> cardTypes,
+    Map<String, dynamic>? policy,
   }) async {
     final FormData formData = FormData.fromMap(<String, dynamic>{
       'file': MultipartFile.fromBytes(bytes, filename: filename),
@@ -298,13 +309,12 @@ class ApiClient {
       'difficulty': difficulty,
       'card_types': cardTypes.join(','),
       'strategy': 'fsrs_friendly',
+      if (policy != null) 'policy_json': jsonEncode(policy),
     });
     final Response<dynamic> response = await _dio.post<dynamic>(
       '/ai/import-file',
       data: formData,
-      options: Options(
-        headers: <String, String>{'Authorization': 'Bearer $token'},
-      ),
+      options: _aiOptions(token),
     );
     return _requireMap(response.data, '/ai/import-file');
   }
@@ -326,11 +336,49 @@ class ApiClient {
         'rewrite_type': rewriteType,
         'instruction': instruction,
       },
-      options: Options(
-        headers: <String, String>{'Authorization': 'Bearer $token'},
-      ),
+      options: _aiOptions(token),
     );
     return _toMapList(response.data, 'candidates');
+  }
+
+  Future<Map<String, dynamic>> chatWithAICards({
+    required String token,
+    required String topic,
+    required String instruction,
+    required int cardCount,
+    required String difficulty,
+    required List<Map<String, String>> messages,
+    required List<Map<String, dynamic>> items,
+    Map<String, dynamic>? reference,
+    Map<String, dynamic>? policy,
+  }) async {
+    final Map<String, dynamic> payload = <String, dynamic>{
+      'topic': topic,
+      'instruction': instruction,
+      'card_count': cardCount,
+      'difficulty': difficulty,
+      'messages': messages,
+      'items': items,
+    };
+    if (reference != null) {
+      payload['reference'] = reference;
+    }
+    if (policy != null) {
+      payload['policy'] = policy;
+    }
+    final Response<dynamic> response = await _dio.post<dynamic>(
+      '/ai/chat-cards',
+      data: payload,
+      options: _aiOptions(token),
+    );
+    return _requireMap(response.data, '/ai/chat-cards');
+  }
+
+  Options _aiOptions(String token) {
+    return Options(
+      headers: <String, String>{'Authorization': 'Bearer $token'},
+      receiveTimeout: aiReceiveTimeout,
+    );
   }
 
   List<Map<String, dynamic>> _toMapList(dynamic data, String field) {

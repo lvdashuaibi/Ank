@@ -108,3 +108,88 @@ func TestMemoryStoreDeleteFolderUnassignsDecks(t *testing.T) {
 		t.Fatalf("expected folder id to be cleared, got %q", deck.FolderID)
 	}
 }
+
+func TestMemoryStoreGenerationPolicyCRUD(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Now()
+	policy := model.GenerationPolicy{
+		ID:             "policy-1",
+		UserID:         "user-1",
+		Name:           "教育学精读",
+		AtomicityLevel: "strict",
+		MaxAnswerChars: 40,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	if err := store.CreateGenerationPolicy(policy); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	got, err := store.GetGenerationPolicy("user-1", "policy-1")
+	if err != nil {
+		t.Fatalf("get policy: %v", err)
+	}
+	if got.Name != "教育学精读" {
+		t.Fatalf("unexpected policy name: %q", got.Name)
+	}
+	if _, err := store.GetGenerationPolicy("user-2", "policy-1"); err != ErrNotFound {
+		t.Fatalf("expected foreign user lookup to return ErrNotFound, got %v", err)
+	}
+
+	policy.Name = "教育学考试"
+	policy.UpdatedAt = now.Add(time.Minute)
+	if err := store.UpdateGenerationPolicy(policy); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+	items := store.ListGenerationPolicies("user-1")
+	if len(items) != 1 || items[0].Name != "教育学考试" {
+		t.Fatalf("unexpected policy list: %+v", items)
+	}
+	if err := store.DeleteGenerationPolicy("user-1", "policy-1"); err != nil {
+		t.Fatalf("delete policy: %v", err)
+	}
+	if len(store.ListGenerationPolicies("user-1")) != 0 {
+		t.Fatalf("expected policy to be deleted")
+	}
+}
+
+func TestMemoryStoreAIGenerationJobCRUD(t *testing.T) {
+	store := NewMemoryStore()
+	now := time.Now()
+	job := model.AIGenerationJob{
+		ID:        "job-1",
+		UserID:    "user-1",
+		Status:    "running",
+		Progress:  0.5,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := store.CreateAIGenerationJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	got, err := store.GetAIGenerationJob("user-1", "job-1")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != "running" || got.Progress != 0.5 {
+		t.Fatalf("unexpected job: %+v", got)
+	}
+	if _, err := store.GetAIGenerationJob("user-2", "job-1"); err != ErrNotFound {
+		t.Fatalf("expected foreign user lookup to return ErrNotFound, got %v", err)
+	}
+
+	job.Status = "succeeded"
+	job.Progress = 1
+	job.Result = &model.AIGenerateResponse{Items: []model.AIGeneratedCard{{Title: "教育目的"}}}
+	if err := store.UpdateAIGenerationJob(job); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+	updated, err := store.GetAIGenerationJob("user-1", "job-1")
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.Result == nil || len(updated.Result.Items) != 1 {
+		t.Fatalf("expected persisted job result, got %+v", updated)
+	}
+}

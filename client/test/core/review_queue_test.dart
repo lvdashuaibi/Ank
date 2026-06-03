@@ -283,6 +283,39 @@ void main() {
 
     expect(queue, expected);
   });
+
+  test('dueCards waits for FSRS due date instead of forcing repeats', () {
+    final AppState state = AppState(
+      decks: <DeckModel>[deck(id: 'deck-1')],
+      cards: <CardModel>[
+        card(
+          id: 'learning-later',
+          deckId: 'deck-1',
+          state: 1,
+          dueDate: now.add(const Duration(minutes: 10)),
+        ),
+        card(
+          id: 'learning-now',
+          deckId: 'deck-1',
+          state: 1,
+          dueDate: now.subtract(const Duration(minutes: 1)),
+        ),
+      ],
+      completedToday: 0,
+      reviewedReviewTodayByDeck: const <String, int>{},
+      introducedNewTodayByDeck: const <String, int>{},
+      isBootstrapping: false,
+      syncInProgress: false,
+      pendingOperations: const <SyncOperation>[],
+      generatedCards: const <AIGeneratedCard>[],
+      dailyProgressDayKey: dayKey(now),
+    );
+
+    expect(
+      state.dueCards(deckId: 'deck-1').map((CardModel item) => item.id),
+      <String>['learning-now'],
+    );
+  });
 }
 
 int _stableReviewOrderValue({

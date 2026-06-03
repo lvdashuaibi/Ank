@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ank Web Console</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Ank Web Console</p>
+          <h1>PC 端卡片工作台</h1>
+          <p class="muted">用于更快地创建牌组、查看卡片、编辑 DSL，并把 AI 草稿保存到云端。</p>
+        </div>
+        <div class="session">
+          <span id="sessionLabel">未登录</span>
+          <button id="logoutButton" class="ghost hidden">退出</button>
+        </div>
+      </section>
+
+      <section id="authPanel" class="card auth-grid">
+        <div>
+          <h2>登录 / 注册</h2>
+          <p class="muted">首次使用直接点注册，会自动创建一个默认牌组。</p>
+        </div>
+        <form id="authForm" class="form-grid">
+          <label>邮箱<input id="emailInput" type="email" autocomplete="email" required /></label>
+          <label>密码<input id="passwordInput" type="password" autocomplete="current-password" required /></label>
+          <label>昵称<input id="displayNameInput" value="Web User" /></label>
+          <div class="actions">
+            <button type="submit" data-action="login">登录</button>
+            <button type="submit" data-action="register" class="secondary">注册</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="appPanel" class="workspace hidden">
+        <aside class="card sidebar">
+          <div class="section-title">
+            <div>
+              <h2>牌组</h2>
+              <p class="muted">云端持久化</p>
+            </div>
+            <button id="refreshButton" class="ghost">刷新</button>
+          </div>
+          <form id="deckForm" class="stack">
+            <input id="deckNameInput" placeholder="新牌组名称" required />
+            <textarea id="deckDescriptionInput" rows="2" placeholder="说明，可选"></textarea>
+            <button type="submit">新建牌组</button>
+          </form>
+          <div id="deckList" class="list"></div>
+        </aside>
+
+        <section class="main-grid">
+          <section class="card">
+            <div class="section-title">
+              <div>
+                <h2 id="deckTitle">请选择牌组</h2>
+                <p id="deckMeta" class="muted">卡片会显示在下方</p>
+              </div>
+            </div>
+            <form id="cardForm" class="editor-grid">
+              <label>标题<input id="cardTitleInput" placeholder="例如：形成性评估最核心的特征是什么？" required /></label>
+              <label>正面 / DSL<textarea id="cardFrontInput" rows="7" placeholder="{single-choice}&#10;Q: ...&#10;* 正确项&#10;- 干扰项&#10;{/single-choice}" required></textarea></label>
+              <label>答案 / 解析<textarea id="cardBackInput" rows="5" placeholder="答案或解析" required></textarea></label>
+              <label>标签<input id="cardTagsInput" placeholder="教育学原理, 考试" /></label>
+              <label class="checkbox"><input id="studyEnabledInput" type="checkbox" checked /> 加入背诵</label>
+              <button type="submit">保存卡片</button>
+            </form>
+          </section>
+
+          <section class="card">
+            <div class="section-title">
+              <div>
+                <h2>AI 制卡</h2>
+                <p class="muted">生成后先预览，再保存到当前牌组。</p>
+              </div>
+            </div>
+            <form id="aiForm" class="editor-grid">
+              <label>主题<input id="aiTopicInput" placeholder="教育学原理：形成性评估" /></label>
+              <label>材料 / 要求<textarea id="aiContextInput" rows="5" placeholder="粘贴知识点、教材片段，或直接描述制卡需求。"></textarea></label>
+              <label>数量<input id="aiCountInput" type="number" min="1" max="20" value="4" /></label>
+              <button type="submit">生成 AI 草稿</button>
+            </form>
+            <div id="aiDrafts" class="drafts"></div>
+          </section>
+
+          <section class="card full">
+            <div class="section-title">
+              <div>
+                <h2>卡片列表</h2>
+                <p id="cardCountLabel" class="muted">0 张</p>
+              </div>
+            </div>
+            <div id="cardList" class="cards"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden"></div>
+    <script src="/web/app.js"></script>
+  </body>
+</html>
