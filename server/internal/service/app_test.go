@@ -1242,6 +1242,38 @@ func TestNewAppServiceRecoversInterruptedAIGenerationJobs(t *testing.T) {
 	}
 }
 
+func TestRepairGeneratedCardsUsesSourceExcerptForMissingAnswers(t *testing.T) {
+	policy := effectiveGenerationPolicy(model.AIGenerateRequest{})
+	items := repairGeneratedCardsForPolicy([]model.AIGeneratedCard{
+		{
+			Title:         "顺序查找的时间复杂度",
+			Content:       "顺序查找的时间复杂度",
+			CardType:      "basic",
+			SourceExcerpt: "顺序查找 | O(N)",
+		},
+		{
+			Title:         "O(N²) 排序算法 — 多选",
+			Content:       "{multi-choice}\nQ: O(N²) 排序算法 — 多选\n* 正确表述\n- 只复述O(N²) 排序算法的材料主题，未回答题干\n- 把局部条件当成完整定义\n- 把原因和结果关系倒置\n{/multi-choice}",
+			CardType:      "multi_choice",
+			SourceExcerpt: "冒泡排序 | O(N²)；选择排序 | O(N²)；插入排序 | O(N²)",
+			Note:          "归并排序 | O(NlogN)；快速排序（平均）| O(NlogN)；堆排序 | O(NlogN)",
+		},
+	}, policy)
+
+	if !strings.Contains(items[0].Back, "O(N)") || !strings.Contains(items[0].Content, "@answer") {
+		t.Fatalf("expected source excerpt to repair missing basic answer, got %+v", items[0])
+	}
+	if strings.Contains(items[1].Content, "正确表述") || strings.Contains(items[1].Content, "把原因和结果关系倒置") {
+		t.Fatalf("expected placeholder options to be removed, got %s", items[1].Content)
+	}
+	if !strings.Contains(items[1].Content, "* 冒泡排序 | O(N²)") || !strings.Contains(items[1].Back, "插入排序 | O(N²)") {
+		t.Fatalf("expected source excerpt to rebuild multi-choice card, got %+v", items[1])
+	}
+	if !strings.Contains(items[1].Content, "- 归并排序 | O(NlogN)") {
+		t.Fatalf("expected note-based distractors, got %s", items[1].Content)
+	}
+}
+
 func waitForAIGenerationJob(t *testing.T, service *AppService, userID, jobID string) model.AIGenerationJob {
 	t.Helper()
 	deadline := time.After(2 * time.Second)

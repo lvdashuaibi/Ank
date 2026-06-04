@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -36,6 +37,49 @@ func chunkDocument(doc extractedDocument, policy model.GenerationPolicy) []docum
 		}
 	}
 	return chunkBySize(text)
+}
+
+func selectDocumentChunksForGeneration(chunks []documentChunk, cardBudget int, policy model.GenerationPolicy) []documentChunk {
+	if len(chunks) == 0 || cardBudget <= 0 {
+		return nil
+	}
+	maxCardsPerChunk := policy.MaxCardsPerChunk
+	if maxCardsPerChunk <= 0 {
+		maxCardsPerChunk = len(chunks)
+	}
+	maxChunkCount := int(math.Ceil(float64(cardBudget) / float64(maxCardsPerChunk)))
+	if maxChunkCount <= 0 || maxChunkCount >= len(chunks) || !strings.EqualFold(strings.TrimSpace(policy.CoverageMode), "balanced") {
+		return chunks
+	}
+	if maxChunkCount == 1 {
+		return chunks[:1]
+	}
+
+	selected := make([]documentChunk, 0, maxChunkCount)
+	seen := map[int]struct{}{}
+	step := float64(len(chunks)-1) / float64(maxChunkCount-1)
+	for i := 0; i < maxChunkCount; i++ {
+		index := int(math.Round(float64(i) * step))
+		if index < 0 {
+			index = 0
+		}
+		if index >= len(chunks) {
+			index = len(chunks) - 1
+		}
+		if _, ok := seen[index]; ok {
+			continue
+		}
+		seen[index] = struct{}{}
+		selected = append(selected, chunks[index])
+	}
+	for index := 0; len(selected) < maxChunkCount && index < len(chunks); index++ {
+		if _, ok := seen[index]; ok {
+			continue
+		}
+		seen[index] = struct{}{}
+		selected = append(selected, chunks[index])
+	}
+	return selected
 }
 
 func chunkMarkdownByHeading(text string) []documentChunk {

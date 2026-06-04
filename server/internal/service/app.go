@@ -1146,7 +1146,16 @@ func repairGeneratedCardsForPolicy(items []model.AIGeneratedCard, policy model.G
 		if strings.TrimSpace(answer) == "" {
 			answer = item.Back
 		}
+		if strings.TrimSpace(answer) == "" {
+			answer = answerFromSourceExcerpt(item)
+		}
 		answer = limitRunes(strings.TrimSpace(answer), policy.MaxAnswerChars)
+		if isChoiceCardType(item.CardType) && choicePromptLooksPlaceholder(prompt) {
+			if repairedPrompt, repairedAnswer, ok := rebuildChoiceCardFromSource(item, prompt); ok {
+				prompt = repairedPrompt
+				answer = limitRunes(repairedAnswer, policy.MaxAnswerChars)
+			}
+		}
 		if isChoiceCardType(item.CardType) && !containsImplementedChoiceDSL(prompt) {
 			if dsl, ok := plainChoicePromptToImplementedDSL(prompt, answer, item.CardType == "multi_choice"); ok {
 				prompt = dsl
@@ -1171,6 +1180,86 @@ func repairGeneratedCardsForPolicy(items []model.AIGeneratedCard, policy model.G
 		repaired = append(repaired, item)
 	}
 	return repaired
+}
+
+func answerFromSourceExcerpt(item model.AIGeneratedCard) string {
+	sourceExcerpt := strings.TrimSpace(item.SourceExcerpt)
+	if sourceExcerpt == "" {
+		return ""
+	}
+	parts := sourceExcerptParts(sourceExcerpt)
+	if len(parts) == 0 {
+		return previewText(sourceExcerpt, 120)
+	}
+	if isChoiceCardType(item.CardType) {
+		return strings.Join(parts, "；")
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	title := strings.TrimSpace(item.Title)
+	for _, part := range parts {
+		if title != "" && sourceTextCovers(part, title) {
+			return part
+		}
+	}
+	return parts[0]
+}
+
+func choicePromptLooksPlaceholder(prompt string) bool {
+	placeholderMarkers := []string{
+		"正确表述",
+		"只复述",
+		"把局部条件当成完整定义",
+		"把原因和结果关系倒置",
+		"与题干核心概念无关",
+		"只描述表面现象",
+	}
+	for _, marker := range placeholderMarkers {
+		if strings.Contains(prompt, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func rebuildChoiceCardFromSource(item model.AIGeneratedCard, prompt string) (string, string, bool) {
+	correct := sourceExcerptParts(item.SourceExcerpt)
+	if len(correct) == 0 {
+		return "", "", false
+	}
+	question := firstNonEmpty(titleFromPromptForCard(prompt), item.Title, item.KnowledgePoint)
+	distractors := sourceExcerptParts(item.Note)
+	if strings.TrimSpace(item.CardType) == "multi_choice" {
+		return composeMultiChoicePrompt(question, correct, distractors), strings.Join(correct, "；"), true
+	}
+	return composeSingleChoicePrompt(question, correct[0], distractors), correct[0], true
+}
+
+func sourceExcerptParts(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	replacer := strings.NewReplacer("\n", "；", ";", "；", "，", "；", ",", "；")
+	rawParts := strings.Split(replacer.Replace(value), "；")
+	parts := make([]string, 0, len(rawParts))
+	seen := map[string]struct{}{}
+	for _, raw := range rawParts {
+		part := strings.TrimSpace(raw)
+		part = strings.TrimLeft(part, "-*• 0123456789.")
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key := strings.ToLower(strings.Join(strings.Fields(part), " "))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, part)
+	}
+	return parts
 }
 
 func limitRunes(value string, max int) string {
@@ -1212,15 +1301,20 @@ func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, 
 	if request.CardCount > 0 && request.CardCount < remaining {
 		remaining = request.CardCount
 	}
+	selectedChunks := selectDocumentChunksForGeneration(chunks, remaining, policy)
 	items := make([]model.AIGeneratedCard, 0, remaining)
-	for _, chunk := range chunks {
+	for chunkIndex, chunk := range selectedChunks {
 		if remaining <= 0 {
 			break
 		}
 		chunkRequest := request
 		chunkRequest.Context = chunk.Text
 		chunkRequest.SourceName = firstNonEmpty(chunk.SourceLocation, chunk.HeadingPath, doc.Title)
-		chunkRequest.CardCount = policy.MaxCardsPerChunk
+		remainingChunks := len(selectedChunks) - chunkIndex
+		chunkRequest.CardCount = int(math.Ceil(float64(remaining) / float64(remainingChunks)))
+		if policy.MaxCardsPerChunk > 0 && chunkRequest.CardCount > policy.MaxCardsPerChunk {
+			chunkRequest.CardCount = policy.MaxCardsPerChunk
+		}
 		if chunkRequest.CardCount > remaining {
 			chunkRequest.CardCount = remaining
 		}
