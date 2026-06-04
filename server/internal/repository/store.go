@@ -37,5 +37,6 @@ type Store interface {
 	ListAIGenerationJobs(userID string) []model.AIGenerationJob
 	GetAIGenerationJob(userID, jobID string) (model.AIGenerationJob, error)
 	UpdateAIGenerationJob(job model.AIGenerationJob) error
+	FailRunningAIGenerationJobs(errorMessage string, now time.Time) (int, error)
 	Close() error
 }

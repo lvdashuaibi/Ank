@@ -376,6 +376,24 @@ func (s *MemoryStore) UpdateAIGenerationJob(job model.AIGenerationJob) error {
 	return nil
 }
 
+func (s *MemoryStore) FailRunningAIGenerationJobs(errorMessage string, now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for id, job := range s.aiJobs {
+		if job.Status != "running" {
+			continue
+		}
+		job.Status = "failed"
+		job.Progress = 1
+		job.ErrorMessage = errorMessage
+		job.UpdatedAt = now
+		s.aiJobs[id] = job
+		count++
+	}
+	return count, nil
+}
+
 func (s *MemoryStore) Close() error {
 	return nil
 }

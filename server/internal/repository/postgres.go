@@ -512,6 +512,20 @@ func (s *PostgresStore) UpdateAIGenerationJob(job model.AIGenerationJob) error {
 	return nil
 }
 
+func (s *PostgresStore) FailRunningAIGenerationJobs(errorMessage string, now time.Time) (int, error) {
+	result, err := s.db.Exec(
+		`UPDATE ai_generation_jobs
+		 SET status = 'failed', progress = 1, error_message = $1, updated_at = $2
+		 WHERE status = 'running'`,
+		errorMessage, now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := result.RowsAffected()
+	return int(affected), nil
+}
+
 func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	schema := `
 CREATE TABLE IF NOT EXISTS users (

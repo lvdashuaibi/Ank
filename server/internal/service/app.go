@@ -29,6 +29,9 @@ var (
 const (
 	ReviewOrderSequential = "sequential"
 	ReviewOrderRandom     = "random"
+
+	defaultAIGenerationJobTimeout = 12 * time.Minute
+	defaultAIGenerationJobTick    = 15 * time.Second
 )
 
 type AppService struct {
@@ -41,7 +44,7 @@ type AppService struct {
 }
 
 func NewAppService(cfg config.Config, store repository.Store, logger *zap.Logger) *AppService {
-	return &AppService{
+	service := &AppService{
 		config: &cfg,
 		store:  store,
 		logger: logger,
@@ -49,6 +52,8 @@ func NewAppService(cfg config.Config, store repository.Store, logger *zap.Logger
 		fsrs:   fsrs.NewEngine(),
 		cache:  newAIToolCache(cfg, logger),
 	}
+	service.recoverInterruptedAIGenerationJobs()
+	return service
 }
 
 func (s *AppService) Register(email, password, displayName string) (model.User, string, error) {
@@ -598,24 +603,99 @@ func (s *AppService) CreateAIGenerationJobFromUpload(userID string, request mode
 }
 
 func (s *AppService) runAIGenerationJob(job model.AIGenerationJob, generate func() model.AIGenerateResponse) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			job.Status = "failed"
-			job.Progress = 1
-			job.ErrorMessage = fmt.Sprintf("AI generation failed: %v", recovered)
-			job.UpdatedAt = time.Now()
-			_ = s.store.UpdateAIGenerationJob(job)
-		}
-	}()
+	s.runAIGenerationJobWithConfig(job, generate, aiGenerationJobRunnerConfig{
+		Timeout: defaultAIGenerationJobTimeout,
+		Tick:    defaultAIGenerationJobTick,
+	})
+}
+
+type aiGenerationJobRunnerConfig struct {
+	Timeout time.Duration
+	Tick    time.Duration
+}
+
+func (s *AppService) runAIGenerationJobWithConfig(job model.AIGenerationJob, generate func() model.AIGenerateResponse, runnerConfig aiGenerationJobRunnerConfig) {
+	if runnerConfig.Timeout <= 0 {
+		runnerConfig.Timeout = defaultAIGenerationJobTimeout
+	}
+	if runnerConfig.Tick <= 0 {
+		runnerConfig.Tick = defaultAIGenerationJobTick
+	}
+
 	job.Progress = 0.2
 	job.UpdatedAt = time.Now()
 	_ = s.store.UpdateAIGenerationJob(job)
-	result := generate()
-	job.Status = "succeeded"
+
+	type generationOutcome struct {
+		result model.AIGenerateResponse
+		panic  any
+	}
+	done := make(chan generationOutcome, 1)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- generationOutcome{panic: recovered}
+			}
+		}()
+		done <- generationOutcome{result: generate()}
+	}()
+
+	timeout := time.NewTimer(runnerConfig.Timeout)
+	defer timeout.Stop()
+	ticker := time.NewTicker(runnerConfig.Tick)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case outcome := <-done:
+			if outcome.panic != nil {
+				s.failAIGenerationJob(job, fmt.Sprintf("AI generation failed: %v", outcome.panic))
+				return
+			}
+			job.Status = "succeeded"
+			job.Progress = 1
+			job.Result = &outcome.result
+			job.UpdatedAt = time.Now()
+			_ = s.store.UpdateAIGenerationJob(job)
+			return
+		case <-ticker.C:
+			if job.Progress < 0.9 {
+				job.Progress += 0.05
+				if job.Progress > 0.9 {
+					job.Progress = 0.9
+				}
+				job.UpdatedAt = time.Now()
+				_ = s.store.UpdateAIGenerationJob(job)
+			}
+		case <-timeout.C:
+			s.failAIGenerationJob(job, fmt.Sprintf("AI generation timed out after %s. Please try again with a shorter document or fewer constraints.", runnerConfig.Timeout.Round(time.Second)))
+			return
+		}
+	}
+}
+
+func (s *AppService) failAIGenerationJob(job model.AIGenerationJob, errorMessage string) {
+	job.Status = "failed"
 	job.Progress = 1
-	job.Result = &result
+	job.ErrorMessage = errorMessage
 	job.UpdatedAt = time.Now()
 	_ = s.store.UpdateAIGenerationJob(job)
+}
+
+func (s *AppService) recoverInterruptedAIGenerationJobs() {
+	if s.store == nil {
+		return
+	}
+	count, err := s.store.FailRunningAIGenerationJobs("服务重启后检测到该后台任务已中断，请重新发起生成。", time.Now())
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("[flashcard_server] failed to recover interrupted ai generation jobs", zap.Error(err))
+		}
+		return
+	}
+	if count > 0 && s.logger != nil {
+		s.logger.Warn("[flashcard_server] recovered interrupted ai generation jobs", zap.Int("count", count))
+	}
 }
 
 func (s *AppService) ListAIGenerationJobs(userID string) []model.AIGenerationJob {

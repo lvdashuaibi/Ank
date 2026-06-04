@@ -1178,6 +1178,70 @@ func TestCreateAIGenerationJobPersistsSucceededResult(t *testing.T) {
 	}
 }
 
+func TestAIGenerationJobTimesOutAndPersistsFailure(t *testing.T) {
+	store := repository.NewMemoryStore()
+	service := NewAppService(config.Config{JWTSecret: "test-secret"}, store, zap.NewNop())
+	job := model.AIGenerationJob{
+		ID:        "timeout-job",
+		UserID:    "user-timeout",
+		Status:    "running",
+		Progress:  0.05,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateAIGenerationJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	block := make(chan struct{})
+	service.runAIGenerationJobWithConfig(job, func() model.AIGenerateResponse {
+		<-block
+		return model.AIGenerateResponse{}
+	}, aiGenerationJobRunnerConfig{
+		Timeout: 25 * time.Millisecond,
+		Tick:    5 * time.Millisecond,
+	})
+	close(block)
+
+	persisted, err := service.GetAIGenerationJob("user-timeout", "timeout-job")
+	if err != nil {
+		t.Fatalf("get timeout job: %v", err)
+	}
+	if persisted.Status != "failed" || persisted.Progress != 1 {
+		t.Fatalf("expected timed out job to fail, got %+v", persisted)
+	}
+	if !strings.Contains(persisted.ErrorMessage, "timed out") {
+		t.Fatalf("expected timeout error message, got %q", persisted.ErrorMessage)
+	}
+}
+
+func TestNewAppServiceRecoversInterruptedAIGenerationJobs(t *testing.T) {
+	store := repository.NewMemoryStore()
+	interrupted := model.AIGenerationJob{
+		ID:        "interrupted-job",
+		UserID:    "user-interrupted",
+		Status:    "running",
+		Progress:  0.2,
+		CreatedAt: time.Now().Add(-time.Hour),
+		UpdatedAt: time.Now().Add(-time.Hour),
+	}
+	if err := store.CreateAIGenerationJob(interrupted); err != nil {
+		t.Fatalf("create interrupted job: %v", err)
+	}
+
+	service := NewAppService(config.Config{JWTSecret: "test-secret"}, store, zap.NewNop())
+	persisted, err := service.GetAIGenerationJob("user-interrupted", "interrupted-job")
+	if err != nil {
+		t.Fatalf("get interrupted job: %v", err)
+	}
+	if persisted.Status != "failed" || persisted.Progress != 1 {
+		t.Fatalf("expected interrupted job to be failed on startup, got %+v", persisted)
+	}
+	if !strings.Contains(persisted.ErrorMessage, "服务重启") {
+		t.Fatalf("expected restart recovery message, got %q", persisted.ErrorMessage)
+	}
+}
+
 func waitForAIGenerationJob(t *testing.T, service *AppService, userID, jobID string) model.AIGenerationJob {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
