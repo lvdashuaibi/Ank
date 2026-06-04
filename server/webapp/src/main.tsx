@@ -17,6 +17,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react";
+import { answerOf, cardToPreview, draftToPreview, previewFront, promptOf } from "./cardPreview";
 import "./styles.css";
 
 const apiBase = "/api/v1";
@@ -594,7 +595,7 @@ function App() {
               <article key={`${draft.title}-${index}`} className={previewDraftIndex === index ? "draft previewing" : selectedDrafts.has(index) ? "draft selected" : "draft"} onClick={() => { setPreviewDraftIndex(index); setSelectedCardId(""); }}>
                 <label className="draft-check" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedDrafts.has(index)} onChange={(e) => toggleDraft(index, e.target.checked, selectedDrafts, setSelectedDrafts)} />保存</label>
                 <h3>{draft.title || `草稿 ${index + 1}`}</h3>
-                <pre>{readablePrompt(draft.front || promptOf(draft.content || ""))}</pre>
+                <pre>{previewFront(draft.content, draft.front)}</pre>
                 <p>{draft.back || answerOf(draft.content || "")}</p>
                 <div className="tags">{(draft.tags || ["AI生成"]).slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
               </article>
@@ -724,57 +725,6 @@ function manualPreviewBack(form: {
     .filter((option) => option.correct && option.text.trim())
     .map((option) => option.text.trim())
     .join("；");
-}
-
-function cardToPreview(card: Card) {
-  return {
-    title: card.title || card.front || "未命名卡片",
-    front: readablePrompt(card.front || promptOf(card.content)),
-    back: card.back || answerOf(card.content),
-    tags: card.tags || [],
-    studyEnabled: card.study_enabled,
-    source: "saved" as const,
-  };
-}
-
-function draftToPreview(draft?: Draft) {
-  if (!draft) return null;
-  return {
-    title: draft.title || "AI 草稿",
-    front: readablePrompt(draft.front || promptOf(draft.content)),
-    back: draft.back || answerOf(draft.content),
-    tags: draft.tags || ["AI生成"],
-    studyEnabled: true,
-    source: "draft" as const,
-  };
-}
-
-function readablePrompt(prompt = "") {
-  const trimmed = prompt.trim();
-  const single = parseChoiceBlock(trimmed, "single-choice");
-  if (single) return single;
-  const multi = parseChoiceBlock(trimmed, "multi-choice");
-  if (multi) return multi;
-  return trimmed;
-}
-
-function parseChoiceBlock(prompt: string, blockName: string) {
-  if (!prompt.includes(`{${blockName}}`)) return "";
-  const lines = prompt.split("\n").map((line) => line.trim()).filter(Boolean);
-  const question = lines.find((line) => line.startsWith("Q:"))?.replace(/^Q:\s*/, "") || "";
-  const options = lines
-    .filter((line) => line.startsWith("*") || line.startsWith("-"))
-    .map((line) => `${line.startsWith("*") ? "●" : "○"} ${line.slice(1).trim()}`);
-  return [question, "", ...options].join("\n").trim();
-}
-
-function promptOf(content = "") {
-  return content.split("@answer")[0].trim();
-}
-
-function answerOf(content = "") {
-  const match = content.match(/@answer\s*([\s\S]*?)\s*@end/);
-  return match?.[1]?.trim() || "";
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
