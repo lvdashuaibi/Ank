@@ -145,3 +145,49 @@ func TestAIAgentToolRegistryRejectsDuplicateAndUnknownTools(t *testing.T) {
 		t.Fatal("expected unknown tool execution to fail")
 	}
 }
+
+func TestAICardGenerationToolRejectsOffSourceExcerpt(t *testing.T) {
+	registry := newAICardGenerationToolRegistry()
+	_, err := registry.Execute(openAIToolCall{
+		ID: "call-off-source",
+		Function: openAIToolFunction{
+			Name: "create_basic_card",
+			Arguments: `{
+				"title":"默认牌组",
+				"question":"什么是 Anki 默认牌组？",
+				"answer":"Anki 安装后自动创建的初始牌组。",
+				"source_excerpt":"Anki 安装后自动创建的初始牌组。"
+			}`,
+		},
+	}, aiAgentToolContext{
+		GenerateRequest: model.AIGenerateRequest{
+			Topic:      "408 计算机组成原理",
+			SourceName: "408.md",
+			Context:    "存储器层次结构包括寄存器、Cache、主存和外存。Cache 利用程序局部性提高访存速度。",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected off-source excerpt to be rejected")
+	}
+	if !strings.Contains(err.Error(), "source_excerpt") {
+		t.Fatalf("expected source excerpt error, got %v", err)
+	}
+}
+
+func TestBuildAIPromptRequiresSourceGroundingForDocuments(t *testing.T) {
+	prompt := buildAIPrompt(model.AIGenerateRequest{
+		Topic:      "408",
+		SourceName: "408-knowledge.md",
+		Context:    "Cache 命中率会影响平均访存时间。",
+	})
+	for _, want := range []string{
+		"SourceGroundingRules",
+		"Only create cards from the Source Document",
+		"Anki",
+		"source_excerpt",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prompt to contain %q, got:\n%s", want, prompt)
+		}
+	}
+}

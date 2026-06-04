@@ -672,6 +672,36 @@ func TestGenerateCardsRepairsFallbackOutputToPolicy(t *testing.T) {
 	}
 }
 
+func TestGenerateCardsFallbackChoiceDistractorsStayDomainNeutral(t *testing.T) {
+	service := newTestAppService(t)
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:      "408 计算机组成原理：Cache 与平均访存时间",
+		Context:    "Cache 是位于 CPU 和主存之间的高速小容量存储器，用于利用程序访问的时间局部性和空间局部性。Cache 命中率表示访问能在 Cache 中找到所需数据的比例。平均访存时间 AMAT = 命中时间 + 缺失率 × 缺失代价，其中缺失率 = 1 - 命中率。提高命中率或降低缺失代价都可以改善存储系统性能。",
+		CardCount:  4,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			PreferredCardTypes: []string{"single_choice", "multi_choice"},
+		},
+	})
+
+	if len(response.Items) != 4 {
+		t.Fatalf("expected 4 generated cards, got %d", len(response.Items))
+	}
+	joined := ""
+	for _, item := range response.Items {
+		joined += item.Content + "\n"
+		if !strings.Contains(item.Content, "{single-choice}") && !strings.Contains(item.Content, "{multi-choice}") {
+			t.Fatalf("expected choice DSL, got %q", item.Content)
+		}
+	}
+	for _, forbidden := range []string{"学习反馈", "最终排名", "教育", "Anki", "默认牌组"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("expected 408 fallback choices to avoid unrelated term %q, got:\n%s", forbidden, joined)
+		}
+	}
+}
+
 func TestGenerateCardsUsesLegacyCardTypesWhenPolicyDoesNotOverride(t *testing.T) {
 	service := newTestAppService(t)
 
@@ -734,7 +764,7 @@ func TestExternalAIAgentLoopExecutesCardGenerationTool(t *testing.T) {
 			if _, ok := requestBody["tools"].([]any); !ok {
 				t.Fatalf("expected first request to include tools, got %+v", requestBody)
 			}
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"create_single_choice_card","arguments":"{\"title\":\"形成性评估\",\"question\":\"形成性评估的主要作用是什么？\",\"correct_answer\":\"支持及时反馈\",\"distractors\":[\"提供最终等级\",\"确定课程目标\",\"定义学习者发展\"],\"answer\":\"形成性评估主要用于支持及时反馈。\"}"}}]}}]}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"create_single_choice_card","arguments":"{\"title\":\"形成性评估\",\"question\":\"形成性评估的主要作用是什么？\",\"correct_answer\":\"支持及时反馈\",\"distractors\":[\"提供最终等级\",\"确定课程目标\",\"定义学习者发展\"],\"answer\":\"形成性评估主要用于支持及时反馈。\",\"source_excerpt\":\"形成性评估强调及时反馈。\"}"}}]}}]}`))
 			return
 		}
 		messages, ok := requestBody["messages"].([]any)

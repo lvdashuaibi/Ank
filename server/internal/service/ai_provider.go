@@ -128,7 +128,7 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 		strategy = "fsrs_friendly"
 	}
 	return fmt.Sprintf(
-		"Topic: %s\nSourceName: %s\nContext: %s\nDifficulty: %s\n%s\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\n%s\n%s",
+		"Topic: %s\nSourceName: %s\nSource Document:\n%s\nDifficulty: %s\n%s\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\n%s\n%s\n%s",
 		strings.TrimSpace(request.Topic),
 		strings.TrimSpace(request.SourceName),
 		strings.TrimSpace(request.Context),
@@ -136,9 +136,21 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 		cardCountLine,
 		cardTypes,
 		strategy,
+		sourceGroundingPromptRules(),
 		policyPromptRules(policy),
 		cardDSLPromptRules(),
 	)
+}
+
+func sourceGroundingPromptRules() string {
+	return strings.Join([]string{
+		"SourceGroundingRules:",
+		"- Only create cards from the Source Document above. Do not use outside knowledge, examples, prior chat context, Anki documentation, or generic app manuals.",
+		"- If SourceName or Topic mentions an exam/domain such as 408, every card must test that domain, not unrelated software behavior such as Anki default decks.",
+		"- Every tool call must include source_excerpt copied or tightly paraphrased from the Source Document.",
+		"- If the Source Document is empty or unrelated, return zero items with a warning instead of inventing cards.",
+		"- Prefer terms that literally appear in the Source Document. 题干、答案和选项必须能从原文找到依据。",
+	}, "\n")
 }
 
 func cardDSLPromptRules() string {
@@ -278,6 +290,9 @@ func executeAICardGenerationTool(toolName string, ctx aiAgentToolContext, argume
 	if err := json.Unmarshal(arguments, &args); err != nil {
 		return aiAgentToolResult{}, err
 	}
+	if err := validateSourceGrounding(ctx.GenerateRequest, args); err != nil {
+		return aiAgentToolResult{}, err
+	}
 
 	cardType := "basic"
 	content := ""
@@ -318,6 +333,84 @@ func executeAICardGenerationTool(toolName string, ctx aiAgentToolContext, argume
 		Content: toolResultJSON(map[string]any{"ok": true, "card": card}),
 		Cards:   []model.AIGeneratedCard{card},
 	}, nil
+}
+
+func validateSourceGrounding(request model.AIGenerateRequest, args aiCardToolArgs) error {
+	context := strings.TrimSpace(request.Context)
+	if context == "" {
+		return nil
+	}
+	excerpt := strings.TrimSpace(args.SourceExcerpt)
+	if excerpt == "" {
+		return fmt.Errorf("source_excerpt is required when Source Document is provided")
+	}
+	if sourceTextCovers(context, excerpt) {
+		return nil
+	}
+	evidence := strings.Join([]string{
+		args.Title,
+		args.Question,
+		args.Answer,
+		args.CorrectAnswer,
+		strings.Join(args.CorrectOptions, " "),
+		strings.Join(args.Distractors, " "),
+		args.KnowledgePoint,
+	}, " ")
+	if sourceTextCovers(context, evidence) {
+		return nil
+	}
+	return fmt.Errorf("source_excerpt is not grounded in Source Document")
+}
+
+func sourceTextCovers(source, candidate string) bool {
+	sourceTokens := significantTokens(source)
+	candidateTokens := significantTokens(candidate)
+	if len(candidateTokens) == 0 {
+		return false
+	}
+	matched := 0
+	for token := range candidateTokens {
+		if _, ok := sourceTokens[token]; ok {
+			matched++
+		}
+	}
+	if matched >= 2 {
+		return true
+	}
+	if len(candidateTokens) <= 2 && matched == len(candidateTokens) {
+		return true
+	}
+	return false
+}
+
+func significantTokens(value string) map[string]struct{} {
+	tokens := map[string]struct{}{}
+	var builder strings.Builder
+	flush := func() {
+		token := strings.ToLower(strings.TrimSpace(builder.String()))
+		builder.Reset()
+		if len([]rune(token)) >= 2 && !isStopToken(token) {
+			tokens[token] = struct{}{}
+		}
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || (r >= '\u4e00' && r <= '\u9fff') {
+			builder.WriteRune(r)
+			continue
+		}
+		flush()
+	}
+	flush()
+	return tokens
+}
+
+func isStopToken(token string) bool {
+	switch token {
+	case "什么", "为什么", "以下", "哪种", "哪个", "一个", "进行", "可以", "包括", "的是", "the", "and", "for", "with":
+		return true
+	default:
+		return false
+	}
 }
 
 func completeAIGeneratedToolCard(card model.AIGeneratedCard, request model.AIGenerateRequest) model.AIGeneratedCard {

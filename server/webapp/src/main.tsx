@@ -57,6 +57,15 @@ type Job = {
   error_message?: string;
   result?: { items?: Draft[]; document?: { title: string; text_length: number } };
 };
+type ManualCardType = "basic" | "single_choice" | "multi_choice" | "cloze";
+type ManualOption = { text: string; correct: boolean };
+
+const defaultManualOptions: ManualOption[] = [
+  { text: "", correct: true },
+  { text: "", correct: false },
+  { text: "", correct: false },
+  { text: "", correct: false },
+];
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem("ank_token") || "");
@@ -84,11 +93,13 @@ function App() {
   });
   const [deckForm, setDeckForm] = useState({ name: "", description: "" });
   const [cardForm, setCardForm] = useState({
+    type: "basic" as ManualCardType,
     title: "",
-    front: "",
-    back: "",
+    question: "",
+    answer: "",
     tags: "",
     studyEnabled: true,
+    options: defaultManualOptions,
   });
   const [aiForm, setAiForm] = useState({
     topic: "",
@@ -102,15 +113,15 @@ function App() {
   const selectedCard = cards.find((card) => card.id === selectedCardId) || cards[0];
   const manualPreview = {
     title: cardForm.title.trim() || "正在制作的新卡片",
-    front: cardForm.front.trim(),
-    back: cardForm.back.trim(),
+    front: manualPreviewFront(cardForm),
+    back: manualPreviewBack(cardForm),
     tags: parseTags(cardForm.tags),
     studyEnabled: cardForm.studyEnabled,
     source: "manual" as const,
   };
   const draftPreview = previewDraftIndex === null ? null : draftToPreview(drafts[previewDraftIndex]);
   const savedPreview = selectedCard ? cardToPreview(selectedCard) : null;
-  const hasManualPreview = Boolean(cardForm.title.trim() || cardForm.front.trim() || cardForm.back.trim());
+  const hasManualPreview = Boolean(cardForm.title.trim() || cardForm.question.trim() || cardForm.answer.trim() || cardForm.options.some((option) => option.text.trim()));
   const activePreview = hasManualPreview ? manualPreview : draftPreview || savedPreview;
 
   useEffect(() => {
@@ -258,22 +269,32 @@ function App() {
   async function createCard(event: React.FormEvent) {
     event.preventDefault();
     if (!selectedDeckId) return setToast("请先选择牌组");
+    const manual = composeManualCard(cardForm);
+    if (!manual.ok) return setToast(manual.error);
     setBusy(true);
     try {
       const card = await api<Card>(`/decks/${selectedDeckId}/cards`, {
         method: "POST",
         body: JSON.stringify({
           title: cardForm.title.trim(),
-          content: composeContent(cardForm.front, cardForm.back),
-          front: cardForm.front.trim(),
-          back: cardForm.back.trim(),
+          content: manual.content,
+          front: manual.front,
+          back: manual.back,
           tags: parseTags(cardForm.tags),
           note: "",
           source: "web",
           study_enabled: cardForm.studyEnabled,
         }),
       });
-      setCardForm({ title: "", front: "", back: "", tags: "", studyEnabled: true });
+      setCardForm({
+        type: "basic",
+        title: "",
+        question: "",
+        answer: "",
+        tags: "",
+        studyEnabled: true,
+        options: defaultManualOptions,
+      });
       setPreviewDraftIndex(null);
       await loadCards(selectedDeckId, card.id);
       setToast("卡片已保存");
@@ -390,6 +411,24 @@ function App() {
     };
   }
 
+  function updateCardForm(patch: Partial<typeof cardForm>) {
+    setCardForm((current) => ({ ...current, ...patch }));
+    setPreviewDraftIndex(null);
+  }
+
+  function updateManualOption(index: number, patch: Partial<ManualOption>) {
+    setCardForm((current) => {
+      const options = current.options.map((option, optionIndex) => {
+        if (optionIndex !== index) {
+          return current.type === "single_choice" && patch.correct ? { ...option, correct: false } : option;
+        }
+        return { ...option, ...patch };
+      });
+      return { ...current, options };
+    });
+    setPreviewDraftIndex(null);
+  }
+
   if (!token) {
     return (
       <main className="auth-shell">
@@ -477,7 +516,7 @@ function App() {
         <section className="maker-panel ai-panel">
           <div className="panel-title">
             <Sparkles size={20} />
-            <div><h2>AI 来做</h2><p>给材料、教材片段或文件，AI 会拆成符合 DSL 的草稿。</p></div>
+            <div><h2>AI 来做</h2><p>给材料、教材片段或文件，AI 会严格从来源内容中拆成草稿。</p></div>
           </div>
           <form onSubmit={generateDrafts} className="ai-grid">
             <label>主题<input value={aiForm.topic} onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })} placeholder="教育学原理：形成性评价" /></label>
@@ -497,9 +536,31 @@ function App() {
             <div><h2>手工制作</h2><p>适合快速补充、修正 AI 草稿，右侧会实时预览整张卡片。</p></div>
           </div>
           <form onSubmit={createCard} className="manual-grid">
-            <label>标题<input value={cardForm.title} onChange={(e) => { setCardForm({ ...cardForm, title: e.target.value }); setPreviewDraftIndex(null); }} placeholder="题目" required /></label>
-            <label className="wide">正面 / DSL<textarea rows={5} value={cardForm.front} onChange={(e) => { setCardForm({ ...cardForm, front: e.target.value }); setPreviewDraftIndex(null); }} required placeholder="{single-choice} 或普通问答正面" /></label>
-            <label className="wide">答案<textarea rows={4} value={cardForm.back} onChange={(e) => { setCardForm({ ...cardForm, back: e.target.value }); setPreviewDraftIndex(null); }} required placeholder="用于自评的标准答案" /></label>
+            <label>标题<input value={cardForm.title} onChange={(e) => updateCardForm({ title: e.target.value })} placeholder="题目" required /></label>
+            <div className="visual-card-type">
+              {[
+                ["basic", "问答卡"],
+                ["single_choice", "单选题"],
+                ["multi_choice", "多选题"],
+                ["cloze", "填空卡"],
+              ].map(([type, label]) => (
+                <button key={type} type="button" className={cardForm.type === type ? "active" : ""} onClick={() => updateCardForm({ type: type as ManualCardType })}>{label}</button>
+              ))}
+            </div>
+            <label className="wide">{cardForm.type === "cloze" ? "填空文本" : "题干"}<textarea rows={4} value={cardForm.question} onChange={(e) => updateCardForm({ question: e.target.value })} required placeholder={cardForm.type === "cloze" ? "例如：Cache 利用 {{局部性原理}} 提高访存速度" : "输入你希望用户回忆或判断的问题"} /></label>
+            {(cardForm.type === "single_choice" || cardForm.type === "multi_choice") && (
+              <div className="wide option-editor">
+                <div className="option-editor-head"><strong>选项</strong><span>{cardForm.type === "single_choice" ? "选择一个正确答案" : "可选择多个正确答案"}</span></div>
+                {cardForm.options.map((option, index) => (
+                  <div key={index} className="option-row">
+                    <label className="option-correct"><input type={cardForm.type === "single_choice" ? "radio" : "checkbox"} name="manual-correct-option" checked={option.correct} onChange={(e) => updateManualOption(index, { correct: e.target.checked })} />正确</label>
+                    <input value={option.text} onChange={(e) => updateManualOption(index, { text: e.target.value })} placeholder={`选项 ${index + 1}`} />
+                  </div>
+                ))}
+                <button type="button" onClick={() => updateCardForm({ options: [...cardForm.options, { text: "", correct: false }] })}>添加选项</button>
+              </div>
+            )}
+            <label className="wide">{cardForm.type === "basic" ? "答案" : "答案解析"}<textarea rows={4} value={cardForm.answer} onChange={(e) => updateCardForm({ answer: e.target.value })} placeholder="用于自评的标准答案或解析" /></label>
             <label>标签<input value={cardForm.tags} onChange={(e) => { setCardForm({ ...cardForm, tags: e.target.value }); setPreviewDraftIndex(null); }} placeholder="教育学, 考试" /></label>
             <label className="inline"><input type="checkbox" checked={cardForm.studyEnabled} onChange={(e) => setCardForm({ ...cardForm, studyEnabled: e.target.checked })} />加入背诵</label>
             <div className="wide actions-row">
@@ -533,7 +594,7 @@ function App() {
               <article key={`${draft.title}-${index}`} className={previewDraftIndex === index ? "draft previewing" : selectedDrafts.has(index) ? "draft selected" : "draft"} onClick={() => { setPreviewDraftIndex(index); setSelectedCardId(""); }}>
                 <label className="draft-check" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedDrafts.has(index)} onChange={(e) => toggleDraft(index, e.target.checked, selectedDrafts, setSelectedDrafts)} />保存</label>
                 <h3>{draft.title || `草稿 ${index + 1}`}</h3>
-                <pre>{promptOf(draft.content || draft.front || "")}</pre>
+                <pre>{readablePrompt(draft.front || promptOf(draft.content || ""))}</pre>
                 <p>{draft.back || answerOf(draft.content || "")}</p>
                 <div className="tags">{(draft.tags || ["AI生成"]).slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}</div>
               </article>
@@ -594,10 +655,81 @@ function composeContent(front: string, back: string) {
   return answer ? `${prompt}\n\n@answer\n${answer}\n@end` : prompt;
 }
 
+function composeManualCard(form: {
+  type: ManualCardType;
+  title: string;
+  question: string;
+  answer: string;
+  options: ManualOption[];
+}): { ok: true; content: string; front: string; back: string } | { ok: false; error: string } {
+  const question = form.question.trim();
+  const answer = form.answer.trim();
+  if (!question) return { ok: false, error: "请填写题干" };
+  if (form.type === "basic" && !answer) return { ok: false, error: "请填写答案" };
+
+  if (form.type === "single_choice" || form.type === "multi_choice") {
+    const options = form.options
+      .map((option) => ({ text: option.text.trim(), correct: option.correct }))
+      .filter((option) => option.text);
+    if (options.length < 2) return { ok: false, error: "选择题至少需要两个选项" };
+    const correct = options.filter((option) => option.correct);
+    if (form.type === "single_choice" && correct.length !== 1) {
+      return { ok: false, error: "单选题必须且只能设置一个正确答案" };
+    }
+    if (form.type === "multi_choice" && correct.length < 1) {
+      return { ok: false, error: "多选题至少需要一个正确答案" };
+    }
+    const blockName = form.type === "single_choice" ? "single-choice" : "multi-choice";
+    const front = [
+      `{${blockName}}`,
+      `Q: ${question}`,
+      ...options.map((option) => `${option.correct ? "*" : "-"} ${option.text}`),
+      `{/${blockName}}`,
+    ].join("\n");
+    const back = answer || correct.map((option) => option.text).join("；");
+    return { ok: true, front, back, content: composeContent(front, back) };
+  }
+
+  return { ok: true, front: question, back: answer, content: composeContent(question, answer) };
+}
+
+function manualPreviewFront(form: {
+  type: ManualCardType;
+  question: string;
+  options: ManualOption[];
+}) {
+  const question = form.question.trim();
+  if (form.type !== "single_choice" && form.type !== "multi_choice") {
+    return question;
+  }
+  const options = form.options
+    .map((option, index) => ({ ...option, text: option.text.trim(), index }))
+    .filter((option) => option.text);
+  return [
+    question,
+    "",
+    ...options.map((option) => `${option.correct ? "●" : "○"} ${option.text}`),
+  ].join("\n").trim();
+}
+
+function manualPreviewBack(form: {
+  type: ManualCardType;
+  answer: string;
+  options: ManualOption[];
+}) {
+  const answer = form.answer.trim();
+  if (answer) return answer;
+  if (form.type !== "single_choice" && form.type !== "multi_choice") return "";
+  return form.options
+    .filter((option) => option.correct && option.text.trim())
+    .map((option) => option.text.trim())
+    .join("；");
+}
+
 function cardToPreview(card: Card) {
   return {
     title: card.title || card.front || "未命名卡片",
-    front: card.front || promptOf(card.content),
+    front: readablePrompt(card.front || promptOf(card.content)),
     back: card.back || answerOf(card.content),
     tags: card.tags || [],
     studyEnabled: card.study_enabled,
@@ -609,12 +741,31 @@ function draftToPreview(draft?: Draft) {
   if (!draft) return null;
   return {
     title: draft.title || "AI 草稿",
-    front: draft.front || promptOf(draft.content),
+    front: readablePrompt(draft.front || promptOf(draft.content)),
     back: draft.back || answerOf(draft.content),
     tags: draft.tags || ["AI生成"],
     studyEnabled: true,
     source: "draft" as const,
   };
+}
+
+function readablePrompt(prompt = "") {
+  const trimmed = prompt.trim();
+  const single = parseChoiceBlock(trimmed, "single-choice");
+  if (single) return single;
+  const multi = parseChoiceBlock(trimmed, "multi-choice");
+  if (multi) return multi;
+  return trimmed;
+}
+
+function parseChoiceBlock(prompt: string, blockName: string) {
+  if (!prompt.includes(`{${blockName}}`)) return "";
+  const lines = prompt.split("\n").map((line) => line.trim()).filter(Boolean);
+  const question = lines.find((line) => line.startsWith("Q:"))?.replace(/^Q:\s*/, "") || "";
+  const options = lines
+    .filter((line) => line.startsWith("*") || line.startsWith("-"))
+    .map((line) => `${line.startsWith("*") ? "●" : "○"} ${line.slice(1).trim()}`);
+  return [question, "", ...options].join("\n").trim();
 }
 
 function promptOf(content = "") {

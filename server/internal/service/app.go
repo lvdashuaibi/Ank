@@ -1659,7 +1659,7 @@ func composeMultiChoiceCardContent(question string, correctOptions, distractors 
 
 func composeSingleChoicePrompt(question, correct string, distractors []string) string {
 	correct = firstNonEmpty(shortChoiceOption(correct), "正确表述")
-	options := compactStrings(append([]string{correct}, normalizeChoiceOptions(distractors)...))
+	options := compactStrings(append([]string{correct}, firstStrings(normalizeChoiceOptions(distractors), 3)...))
 	for len(options) < 4 {
 		options = append(options, fallbackDistractorByIndex(len(options)))
 	}
@@ -1679,7 +1679,7 @@ func composeMultiChoicePrompt(question string, correctOptions, distractors []str
 	if len(correct) == 0 {
 		correct = []string{"正确表述"}
 	}
-	options := compactStrings(append(correct, normalizeChoiceOptions(distractors)...))
+	options := compactStrings(append(correct, firstStrings(normalizeChoiceOptions(distractors), 3)...))
 	for len(options) < len(correct)+2 {
 		options = append(options, fallbackDistractorByIndex(len(options)))
 	}
@@ -1707,6 +1707,13 @@ func normalizeChoiceOptions(values []string) []string {
 	return out
 }
 
+func firstStrings(values []string, count int) []string {
+	if count <= 0 || len(values) <= count {
+		return values
+	}
+	return values[:count]
+}
+
 func shortChoiceOption(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.Trim(value, "。；;，,")
@@ -1726,9 +1733,9 @@ func fallbackChoiceDistractors(topic, correct string, facts []string, index int)
 		}
 	}
 	out = append(out,
-		fmt.Sprintf("只表示%s的材料名称", firstNonEmpty(strings.TrimSpace(topic), "该知识点")),
-		"与学习反馈和概念理解无关",
-		"只用于最终排名，不支持学习改进",
+		fmt.Sprintf("只复述%s的材料主题，未回答题干", firstNonEmpty(strings.TrimSpace(topic), "该知识点")),
+		"把局部条件当成完整定义",
+		"把原因和结果关系倒置",
 	)
 	return compactStrings(out)
 }
