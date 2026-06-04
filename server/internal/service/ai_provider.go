@@ -692,34 +692,149 @@ func (s *AppService) performCachedBraveSearch(ctx context.Context, args aiWebSea
 	country := firstNonEmpty(strings.TrimSpace(args.Country), strings.TrimSpace(s.config.BraveCountry), "CN")
 	searchLang := firstNonEmpty(strings.TrimSpace(args.SearchLang), strings.TrimSpace(s.config.BraveSearchLang), "zh")
 	freshness := normalizeBraveFreshness(args.Freshness)
-	cacheKey := aiCacheKey("brave-search", query, strconv.Itoa(count), country, searchLang, freshness)
+	cacheKey := aiCacheKey("brave-search-v2", query, strconv.Itoa(count), country, searchLang, freshness)
 	if s.cache != nil {
 		if cached, ok := s.cache.Get(ctx, cacheKey); ok {
 			return cached, nil
 		}
 	}
 
-	results, err := s.performBraveSearch(ctx, query, count, country, searchLang, freshness)
+	searchResult, err := s.performBraveSearchWithFallbacks(ctx, query, count, country, searchLang, freshness)
 	if err != nil {
 		return "", err
 	}
 	content := toolResultJSON(map[string]any{
-		"ok":           true,
-		"intent":       strings.TrimSpace(args.Intent),
-		"provider":     "brave",
-		"query":        query,
-		"country":      country,
-		"search_lang":  searchLang,
-		"freshness":    freshness,
-		"next_tool":    "read_web_page",
-		"next_hint":    "Call read_web_page with a result URL when source details are important.",
-		"results":      results,
-		"cached_until": time.Now().Add(aiWebSearchCacheTTL).Format(time.RFC3339),
+		"ok":            true,
+		"intent":        strings.TrimSpace(args.Intent),
+		"provider":      "brave",
+		"query":         query,
+		"country":       country,
+		"search_lang":   searchLang,
+		"freshness":     freshness,
+		"fallback_used": searchResult.FallbackUsed,
+		"attempts":      searchResult.Attempts,
+		"next_tool":     "read_web_page",
+		"next_hint":     "Call read_web_page with a result URL when source details are important.",
+		"results":       searchResult.Results,
+		"cached_until":  time.Now().Add(aiWebSearchCacheTTL).Format(time.RFC3339),
 	})
 	if s.cache != nil {
 		s.cache.Set(ctx, cacheKey, content, aiWebSearchCacheTTL)
 	}
 	return content, nil
+}
+
+type aiBraveSearchAttempt struct {
+	Query      string `json:"query"`
+	Country    string `json:"country"`
+	SearchLang string `json:"search_lang"`
+	Results    int    `json:"results"`
+}
+
+type aiBraveSearchResult struct {
+	Results      []map[string]string    `json:"results"`
+	Attempts     []aiBraveSearchAttempt `json:"attempts"`
+	FallbackUsed bool                   `json:"fallback_used"`
+}
+
+func (s *AppService) performBraveSearchWithFallbacks(ctx context.Context, query string, count int, country string, searchLang string, freshness string) (aiBraveSearchResult, error) {
+	plans := buildBraveSearchFallbackPlans(query, country, searchLang)
+	merged := make([]map[string]string, 0, count)
+	seen := map[string]struct{}{}
+	attempts := make([]aiBraveSearchAttempt, 0, len(plans))
+	for index, plan := range plans {
+		remaining := count - len(merged)
+		if remaining <= 0 {
+			break
+		}
+		results, err := s.performBraveSearch(ctx, plan.Query, count, plan.Country, plan.SearchLang, freshness)
+		if err != nil {
+			if index == 0 {
+				return aiBraveSearchResult{}, err
+			}
+			continue
+		}
+		attempts = append(attempts, aiBraveSearchAttempt{
+			Query:      plan.Query,
+			Country:    plan.Country,
+			SearchLang: plan.SearchLang,
+			Results:    len(results),
+		})
+		for _, item := range results {
+			key := firstNonEmpty(strings.TrimSpace(item["url"]), strings.TrimSpace(item["title"])+"|"+strings.TrimSpace(item["snippet"]))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, item)
+			if len(merged) >= count {
+				break
+			}
+		}
+		if len(merged) > 0 {
+			break
+		}
+	}
+	if len(merged) == 0 {
+		merged = append(merged, map[string]string{
+			"title":   query,
+			"url":     "",
+			"snippet": "No Brave web result was returned after localized and expanded fallback searches. Use the source document first or try a more explicit query.",
+		})
+	}
+	return aiBraveSearchResult{
+		Results:      merged,
+		Attempts:     attempts,
+		FallbackUsed: len(attempts) > 1,
+	}, nil
+}
+
+type aiBraveSearchPlan struct {
+	Query      string
+	Country    string
+	SearchLang string
+}
+
+func buildBraveSearchFallbackPlans(query string, country string, searchLang string) []aiBraveSearchPlan {
+	plans := []aiBraveSearchPlan{{Query: query, Country: country, SearchLang: searchLang}}
+	add := func(candidate aiBraveSearchPlan) {
+		candidate.Query = strings.TrimSpace(candidate.Query)
+		candidate.Country = firstNonEmpty(strings.TrimSpace(candidate.Country), "CN")
+		candidate.SearchLang = firstNonEmpty(strings.TrimSpace(candidate.SearchLang), "zh")
+		if candidate.Query == "" {
+			return
+		}
+		for _, existing := range plans {
+			if existing.Query == candidate.Query && existing.Country == candidate.Country && existing.SearchLang == candidate.SearchLang {
+				return
+			}
+		}
+		plans = append(plans, candidate)
+	}
+	add(aiBraveSearchPlan{Query: query, Country: "US", SearchLang: "en"})
+	for _, expanded := range expandBraveSearchQuery(query) {
+		add(aiBraveSearchPlan{Query: expanded, Country: "US", SearchLang: "en"})
+		add(aiBraveSearchPlan{Query: expanded, Country: "CN", SearchLang: "zh"})
+	}
+	return plans
+}
+
+func expandBraveSearchQuery(query string) []string {
+	lower := strings.ToLower(query)
+	expanded := make([]string, 0, 3)
+	if strings.Contains(lower, "amat") || (strings.Contains(lower, "cache") && strings.Contains(query, "访存")) {
+		expanded = append(expanded,
+			"average memory access time AMAT cache miss penalty",
+			"408 平均访存时间 cache 缺失率 缺失代价",
+		)
+	}
+	if strings.Contains(lower, "cache") && strings.Contains(query, "408") {
+		expanded = append(expanded, "408 computer organization cache common mistakes")
+	}
+	return compactStrings(expanded)
 }
 
 func (s *AppService) performBraveSearch(ctx context.Context, query string, count int, country string, searchLang string, freshness string) ([]map[string]string, error) {
@@ -785,13 +900,6 @@ func (s *AppService) performBraveSearch(ctx context.Context, query string, count
 		if len(results) >= count {
 			break
 		}
-	}
-	if len(results) == 0 {
-		results = append(results, map[string]string{
-			"title":   query,
-			"url":     "",
-			"snippet": "No Brave web result was returned. Use the source document first or search again with a more specific query.",
-		})
 	}
 	return results, nil
 }

@@ -75,6 +75,57 @@ func TestSearchWebToolUsesBraveAPIAndCache(t *testing.T) {
 	}
 }
 
+func TestSearchWebToolFallsBackWhenLocalizedQueryHasNoResults(t *testing.T) {
+	queries := make([]string, 0)
+	brave := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		queries = append(queries, query.Get("q")+"|"+query.Get("country")+"|"+query.Get("search_lang"))
+		results := []map[string]string{}
+		if query.Get("country") == "US" && query.Get("search_lang") == "en" {
+			results = append(results, map[string]string{
+				"title":       "408 Cache AMAT fallback",
+				"url":         "https://example.com/amat-fallback",
+				"description": "Average memory access time and cache miss penalty.",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{"results": results},
+		})
+	}))
+	defer brave.Close()
+
+	service := NewAppService(config.Config{
+		JWTSecret:       "test-secret",
+		BraveAPIKey:     "brave-test-key",
+		BraveSearchURL:  brave.URL,
+		BraveCountry:    "CN",
+		BraveSearchLang: "zh",
+	}, repository.NewMemoryStore(), zap.NewNop())
+	registry := newAICardGenerationToolRegistry(model.AIGenerateRequest{AllowWebSearch: true})
+	result, err := registry.Execute(openAIToolCall{Function: openAIToolFunction{
+		Name:      "search_web",
+		Arguments: `{"query":"408 cache AMAT 易错点","max_results":3}`,
+	}}, aiAgentToolContext{GenerateRequest: model.AIGenerateRequest{AllowWebSearch: true}, Service: service})
+	if err != nil {
+		t.Fatalf("execute fallback search: %v", err)
+	}
+	if !strings.Contains(result.Content, "408 Cache AMAT fallback") {
+		t.Fatalf("expected fallback result, got %s", result.Content)
+	}
+	if len(queries) < 2 {
+		t.Fatalf("expected localized search and fallback search, got %v", queries)
+	}
+	if queries[0] != "408 cache AMAT 易错点|CN|zh" {
+		t.Fatalf("unexpected first query: %v", queries)
+	}
+	if queries[1] != "408 cache AMAT 易错点|US|en" {
+		t.Fatalf("unexpected fallback query: %v", queries)
+	}
+	if !strings.Contains(result.Content, "fallback_used") {
+		t.Fatalf("expected fallback metadata, got %s", result.Content)
+	}
+}
+
 func TestReadWebPageToolUsesJinaReader(t *testing.T) {
 	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer jina-test-key" {
