@@ -202,6 +202,27 @@ h1, h2, h3, p { margin: 0; }
   line-height: 1.45;
   font-weight: 520;
 }
+.generation-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #c9ddd3;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(47, 125, 114, 0.10), rgba(255, 255, 255, 0.78));
+  color: var(--muted);
+}
+.generation-summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 800;
+}
+.generation-summary strong {
+  color: var(--accent);
+  font-size: 0.9rem;
+}
 .deck-create button { background: #dce8e0; justify-content: flex-start; }
 .deck-list {
   display: grid;

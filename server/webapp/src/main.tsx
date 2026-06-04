@@ -18,6 +18,7 @@ import {
   Upload,
 } from "lucide-react";
 import { answerOf, cardToPreview, draftToPreview, previewFront, promptOf } from "./cardPreview";
+import { estimateGeneration } from "./generationEstimate";
 import "./styles.css";
 
 const apiBase = "/api/v1";
@@ -116,6 +117,13 @@ function App() {
   const selectedDeck = decks.find((deck) => deck.id === selectedDeckId);
   const selectedDraftCount = selectedDrafts.size;
   const selectedCard = cards.find((card) => card.id === selectedCardId) || cards[0];
+  const generationEstimate = estimateGeneration({
+    contextLength: aiForm.context.length,
+    cardCount: Number(aiForm.count || 0),
+    hasFile: Boolean(file),
+    allowWebSearch: aiForm.allowWebSearch,
+    examMode: aiForm.examMode,
+  });
   const manualPreview = {
     title: cardForm.title.trim() || "正在制作的新卡片",
     front: manualPreviewFront(cardForm),
@@ -310,10 +318,16 @@ function App() {
     }
   }
 
-  async function generateDrafts(event: React.FormEvent) {
+  async function startGeneration(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     try {
+      if (generationEstimate.shouldUseBackground) {
+        await createGenerationJob();
+        await loadJobs();
+        setToast(`已转入后台任务，预计 ${generationEstimate.label}`);
+        return;
+      }
       const body = await api<{ items: Draft[] }>("/ai/generate", {
         method: "POST",
         body: JSON.stringify(aiPayload()),
@@ -328,35 +342,26 @@ function App() {
     }
   }
 
-  async function startBackgroundJob() {
-    setBusy(true);
-    try {
-	      if (file) {
-	        const form = new FormData();
-	        form.append("file", file);
-	        form.append("topic", aiForm.topic.trim() || selectedDeck?.name || "AI 制卡");
-	        if (aiForm.count.trim()) form.append("card_count", aiForm.count.trim());
-	        form.append("difficulty", "medium");
-	        form.append("card_types", "basic,single_choice,multi_choice,cloze");
-	        form.append("learning_goal", aiForm.learningGoal.trim());
-	        form.append("allow_web_search", String(aiForm.allowWebSearch));
-	        form.append("exam_mode", String(aiForm.examMode));
-	        form.append("strict_source", String(aiForm.strictSource));
-	        form.append("policy_json", JSON.stringify(policyPayload()));
-        await api<Job>("/ai/import-file-job", { method: "POST", body: form });
-      } else {
-        await api<Job>("/ai/generate-jobs", {
-          method: "POST",
-          body: JSON.stringify(aiPayload()),
-        });
-      }
-      await loadJobs();
-      setToast("已转入后台生成");
-    } catch (error) {
-      setToast(String(error instanceof Error ? error.message : error));
-    } finally {
-      setBusy(false);
+  async function createGenerationJob() {
+    if (file) {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("topic", aiForm.topic.trim() || selectedDeck?.name || "AI 制卡");
+      if (aiForm.count.trim()) form.append("card_count", aiForm.count.trim());
+      form.append("difficulty", "medium");
+      form.append("card_types", "basic,single_choice,multi_choice,cloze");
+      form.append("learning_goal", aiForm.learningGoal.trim());
+      form.append("allow_web_search", String(aiForm.allowWebSearch));
+      form.append("exam_mode", String(aiForm.examMode));
+      form.append("strict_source", String(aiForm.strictSource));
+      form.append("policy_json", JSON.stringify(policyPayload()));
+      await api<Job>("/ai/import-file-job", { method: "POST", body: form });
+      return;
     }
+    await api<Job>("/ai/generate-jobs", {
+      method: "POST",
+      body: JSON.stringify(aiPayload()),
+    });
   }
 
   async function saveSelectedDrafts() {
@@ -531,7 +536,7 @@ function App() {
 	            <Sparkles size={20} />
 	            <div><h2>AI 来做</h2><p>给模型目标和材料，Agent 会自主选择题型；联网只在你允许时启用。</p></div>
 	          </div>
-	          <form onSubmit={generateDrafts} className="ai-grid">
+	          <form onSubmit={startGeneration} className="ai-grid">
 	            <label>主题<input value={aiForm.topic} onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })} placeholder="教育学原理：形成性评价" /></label>
 	            <label>数量（可选）<input type="number" min={1} max={20} value={aiForm.count} onChange={(e) => setAiForm({ ...aiForm, count: e.target.value })} placeholder="留空自动拆分" /></label>
 	            <label className="wide">学习目标<input value={aiForm.learningGoal} onChange={(e) => setAiForm({ ...aiForm, learningGoal: e.target.value })} placeholder="例如：408 考试强化、长期记忆、面试速记" /></label>
@@ -550,13 +555,16 @@ function App() {
 	              </label>
 	            </div>
 	            <label className="wide">材料 / 要求<textarea rows={5} value={aiForm.context} onChange={(e) => setAiForm({ ...aiForm, context: e.target.value })} placeholder="粘贴知识点、教材片段，或描述你想要的卡片。" /></label>
-            <label className="file-drop"><Upload size={18} />{file ? file.name : "可选：后台生成可读取 PDF / Markdown / TXT"}<input type="file" accept=".pdf,.md,.markdown,.txt" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
-            <div className="wide actions-row">
-              <button className="primary" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}生成草稿</button>
-              <button type="button" className="secondary" onClick={() => void startBackgroundJob()} disabled={busy}><Cloud size={18} />后台生成</button>
-            </div>
-          </form>
-        </section>
+	            <label className="file-drop"><Upload size={18} />{file ? file.name : "可选：上传 PDF / Markdown / TXT"}<input type="file" accept=".pdf,.md,.markdown,.txt" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
+	            <div className="wide generation-summary">
+	              <span><Clock3 size={16} />预计 {generationEstimate.label}</span>
+	              <strong>{generationEstimate.modeLabel}</strong>
+	            </div>
+	            <div className="wide actions-row">
+	              <button className="primary" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : generationEstimate.shouldUseBackground ? <Cloud size={18} /> : <Sparkles size={18} />}开始生成</button>
+	            </div>
+	          </form>
+	        </section>
 
         <section className="maker-panel manual-card">
           <div className="panel-title">
@@ -600,7 +608,7 @@ function App() {
         <section className="job-strip">
           {jobs.slice(0, 4).map((job) => (
             <article key={job.id} className={`job ${job.status}`}>
-              <div><strong>{job.source_name || "后台生成任务"}</strong><span>{job.status === "succeeded" ? `${job.result?.items?.length || 0} 张草稿可取回` : job.status === "failed" ? job.error_message || "生成失败" : `生成中 ${Math.round((job.progress || 0) * 100)}%`}</span></div>
+              <div><strong>{job.source_name || "后台任务"}</strong><span>{job.status === "succeeded" ? `${job.result?.items?.length || 0} 张草稿可取回` : job.status === "failed" ? job.error_message || "生成失败" : `处理中 ${Math.round((job.progress || 0) * 100)}%`}</span></div>
               <button disabled={!job.result?.items?.length} onClick={() => { const items = job.result?.items || []; setDrafts(items); setSelectedDrafts(new Set(items.map((_, i) => i))); setToast(`已取回 ${items.length} 张草稿`); }}>取回</button>
             </article>
           ))}
@@ -617,7 +625,7 @@ function App() {
           </div>
           <div className="draft-grid">
             {drafts.length === 0 ? (
-              <div className="empty-state"><Sparkles size={28} /><strong>等待第一批 AI 草稿</strong><span>同步生成适合短材料；教材或 PDF 建议后台生成。</span></div>
+              <div className="empty-state"><Sparkles size={28} /><strong>等待第一批 AI 草稿</strong><span>短材料会直接显示草稿；文件、联网增强或长材料会自动进入后台任务。</span></div>
             ) : drafts.map((draft, index) => (
               <article key={`${draft.title}-${index}`} className={previewDraftIndex === index ? "draft previewing" : selectedDrafts.has(index) ? "draft selected" : "draft"} onClick={() => { setPreviewDraftIndex(index); setSelectedCardId(""); }}>
                 <label className="draft-check" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedDrafts.has(index)} onChange={(e) => toggleDraft(index, e.target.checked, selectedDrafts, setSelectedDrafts)} />保存</label>
