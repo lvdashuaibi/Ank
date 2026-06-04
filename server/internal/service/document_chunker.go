@@ -45,7 +45,7 @@ func selectDocumentChunksForGeneration(chunks []documentChunk, cardBudget int, p
 	}
 	maxCardsPerChunk := policy.MaxCardsPerChunk
 	if maxCardsPerChunk <= 0 {
-		maxCardsPerChunk = len(chunks)
+		maxCardsPerChunk = 1
 	}
 	maxChunkCount := int(math.Ceil(float64(cardBudget) / float64(maxCardsPerChunk)))
 	if maxChunkCount <= 0 || maxChunkCount >= len(chunks) || !strings.EqualFold(strings.TrimSpace(policy.CoverageMode), "balanced") {

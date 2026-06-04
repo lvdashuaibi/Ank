@@ -122,7 +122,7 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 	facts := extractAtomicFacts(request.Context, request.Topic)
 	cardCountLine := fmt.Sprintf("CardCount: %d", effectiveAICardCount(request, facts, policy))
 	if request.CardCount <= 0 {
-		cardCountLine = fmt.Sprintf("CardCount: auto\nTargetCardRange: 3-%d\nInstruction: You choose the appropriate number of atomic cards based on the material and goal; do not pad with duplicates.", effectiveAICardCount(request, facts, policy))
+		cardCountLine = "CardCount: auto\nInstruction: Decide the appropriate number of cards from the material density and learning goal. Create one card for each atomic, test-worthy knowledge point; merge trivial duplicates; do not stop early because of any default app limit."
 	}
 	cardTypes := strings.Join(policy.PreferredCardTypes, ", ")
 	if strings.TrimSpace(cardTypes) == "" {

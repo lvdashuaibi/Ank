@@ -804,6 +804,30 @@ func TestExternalAIAgentLoopExecutesCardGenerationTool(t *testing.T) {
 	}
 }
 
+func TestGenerateCardsHonorsExplicitCardCountForExternalAI(t *testing.T) {
+	fakeAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"items\":[{\"title\":\"卡片1\",\"front\":\"问题1\",\"back\":\"答案1\",\"content\":\"问题1\\n\\n@answer\\n答案1\\n@end\",\"card_type\":\"basic\",\"source_excerpt\":\"形成性评价强调及时反馈。\"},{\"title\":\"卡片2\",\"front\":\"问题2\",\"back\":\"答案2\",\"content\":\"问题2\\n\\n@answer\\n答案2\\n@end\",\"card_type\":\"basic\",\"source_excerpt\":\"形成性评价强调及时反馈。\"}]}"}}]}`))
+	}))
+	defer fakeAI.Close()
+
+	service := NewAppService(config.Config{
+		JWTSecret: "test-secret",
+		AIBaseURL: fakeAI.URL,
+		AIAPIKey:  "test-key",
+		AIModel:   "deepseek-v4-pro",
+	}, repository.NewMemoryStore(), zap.NewNop())
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:     "教育学原理",
+		Context:   "形成性评价强调及时反馈。",
+		CardCount: 1,
+	})
+
+	if got := len(response.Items); got != 1 {
+		t.Fatalf("expected explicit card count to cap external AI response, got %d", got)
+	}
+}
+
 func TestGenerateCardsFromMarkdownDocumentIncludesImageSummary(t *testing.T) {
 	service := newTestAppService(t)
 	doc, err := extractDocumentText("education.md", "text/markdown", []byte(strings.Join([]string{
@@ -1086,6 +1110,91 @@ func TestGenerateCardsChoosesCardCountWhenUnspecified(t *testing.T) {
 
 	if got := len(response.Items); got < 5 {
 		t.Fatalf("expected unspecified count to follow source granularity, got %d", got)
+	}
+}
+
+func TestDefaultGenerationPolicyDoesNotImposeCardCountLimit(t *testing.T) {
+	policy := effectiveGenerationPolicy(model.AIGenerateRequest{})
+
+	if policy.MaxCardsTotal != 0 {
+		t.Fatalf("expected default policy to leave total card count unlimited, got %d", policy.MaxCardsTotal)
+	}
+	if policy.MaxCardsPerChunk != 0 {
+		t.Fatalf("expected default policy to leave per-chunk card count unlimited, got %d", policy.MaxCardsPerChunk)
+	}
+}
+
+func TestGenerateCardsDoesNotCapAutomaticCountAtEight(t *testing.T) {
+	service := newTestAppService(t)
+	facts := []string{
+		"Cache 命中率会影响平均访存时间",
+		"AMAT 等于命中时间加未命中率乘以未命中代价",
+		"直接映射 Cache 每个主存块只能映射到一个 Cache 行",
+		"全相联映射允许主存块映射到任意 Cache 行",
+		"组相联映射先定位组再在组内任选一行",
+		"写直达会同时更新 Cache 和主存",
+		"写回会在替换脏块时更新主存",
+		"TLB 用于缓存页表项以减少地址转换开销",
+		"缺页中断由操作系统处理并可能触发页面调入",
+		"局部性原理包括时间局部性和空间局部性",
+	}
+
+	response := service.GenerateCards(model.AIGenerateRequest{
+		Topic:      "408 存储系统",
+		Context:    strings.Join(facts, "。"),
+		CardCount:  0,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			PreferredCardTypes: []string{"basic"},
+		},
+	})
+
+	if got := len(response.Items); got != len(facts) {
+		t.Fatalf("expected automatic count to follow all source facts without default 8-card cap, got %d want %d", got, len(facts))
+	}
+}
+
+func TestGenerateCardsFromDocumentUsesAllChunksWhenCountUnspecified(t *testing.T) {
+	service := newTestAppService(t)
+	doc := extractedDocument{
+		Title:      "408.md",
+		MimeType:   "text/markdown",
+		TextLength: 300,
+		Text: strings.Join([]string{
+			"# 408 知识点",
+			"## Cache",
+			"AMAT 等于命中时间加未命中率乘以未命中代价。",
+			"## TLB",
+			"TLB 用于缓存页表项以减少地址转换开销。",
+			"## 页面置换",
+			"LRU 会优先置换最长时间未被访问的页面。",
+			"## 文件系统",
+			"索引分配通过索引块记录文件数据块地址。",
+		}, "\n"),
+	}
+
+	response := service.GenerateCardsFromDocument(model.AIGenerateRequest{
+		Topic:      "408",
+		CardCount:  0,
+		Difficulty: "medium",
+		Policy: &model.GenerationPolicy{
+			PreferredCardTypes: []string{"basic"},
+			SplitStrategy:      "by_heading",
+			CoverageMode:       "balanced",
+		},
+	}, doc)
+
+	locations := strings.Join(func() []string {
+		values := make([]string, 0, len(response.Items))
+		for _, item := range response.Items {
+			values = append(values, item.SourceLocation)
+		}
+		return values
+	}(), "\n")
+	for _, want := range []string{"Cache", "TLB", "页面置换", "文件系统"} {
+		if !strings.Contains(locations, want) {
+			t.Fatalf("expected automatic document generation to include chunk %q, got locations:\n%s", want, locations)
+		}
 	}
 }
 

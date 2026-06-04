@@ -206,6 +206,7 @@ func TestBuildAIPromptTrustsModelWithMinimalGuardrails(t *testing.T) {
 		"ModelAutonomy",
 		"choose the best card type yourself",
 		"Tools are optional capabilities",
+		"CardCount: auto",
 		"AllowedWebSearch: true",
 		"ExamMode: true",
 		"StrictSource: false",
@@ -213,6 +214,9 @@ func TestBuildAIPromptTrustsModelWithMinimalGuardrails(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected prompt to contain %q, got:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "TargetCardRange") {
+		t.Fatalf("expected automatic prompt not to include hidden target card range, got:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "定义必须") || strings.Contains(prompt, "公式必须") {
 		t.Fatalf("expected prompt to avoid rigid card-type mapping, got:\n%s", prompt)

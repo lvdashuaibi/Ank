@@ -119,6 +119,7 @@ function App() {
   const selectedCard = cards.find((card) => card.id === selectedCardId) || cards[0];
   const generationEstimate = estimateGeneration({
     contextLength: aiForm.context.length,
+    fileSize: file?.size,
     cardCount: Number(aiForm.count || 0),
     hasFile: Boolean(file),
     allowWebSearch: aiForm.allowWebSearch,
@@ -400,19 +401,19 @@ function App() {
     }
   }
 
-	  function aiPayload() {
-	    return {
-	      topic: aiForm.topic.trim() || selectedDeck?.name || "AI 制卡",
-	      context: aiForm.context.trim(),
-	      ...(Number(aiForm.count || 0) > 0 ? { card_count: Number(aiForm.count) } : {}),
-	      difficulty: "medium",
-	      learning_goal: aiForm.learningGoal.trim(),
-	      allow_web_search: aiForm.allowWebSearch,
-	      exam_mode: aiForm.examMode,
-	      strict_source: aiForm.strictSource,
-	      policy: policyPayload(),
-	    };
-	  }
+  function aiPayload() {
+    return {
+      topic: aiForm.topic.trim() || selectedDeck?.name || "AI 制卡",
+      context: aiForm.context.trim(),
+      ...(Number(aiForm.count || 0) > 0 ? { card_count: Number(aiForm.count) } : {}),
+      difficulty: "medium",
+      learning_goal: aiForm.learningGoal.trim(),
+      allow_web_search: aiForm.allowWebSearch,
+      exam_mode: aiForm.examMode,
+      strict_source: aiForm.strictSource,
+      policy: policyPayload(),
+    };
+  }
 
   function policyPayload() {
     return {
@@ -423,10 +424,8 @@ function App() {
       preferred_card_types: ["basic", "cloze", "single_choice", "multi_choice"],
       split_strategy: "by_heading",
       coverage_mode: "balanced",
-	      max_cards_total: 16,
-	      max_cards_per_chunk: 5,
-	      custom_rules: "模型自主选择题型；题干聚焦单一知识点；选择题必须使用 Ank DSL；答案短、可自评。",
-	    };
+      custom_rules: "不预设卡片数量，由模型根据材料密度自主拆分；模型自主选择题型；题干聚焦单一知识点；选择题必须使用 Ank DSL；答案短、可自评。",
+    };
   }
 
   function updateCardForm(patch: Partial<typeof cardForm>) {
@@ -538,7 +537,7 @@ function App() {
 	          </div>
 	          <form onSubmit={startGeneration} className="ai-grid">
 	            <label>主题<input value={aiForm.topic} onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })} placeholder="教育学原理：形成性评价" /></label>
-	            <label>数量（可选）<input type="number" min={1} max={20} value={aiForm.count} onChange={(e) => setAiForm({ ...aiForm, count: e.target.value })} placeholder="留空自动拆分" /></label>
+	            <label>数量（可选）<input type="number" min={1} value={aiForm.count} onChange={(e) => setAiForm({ ...aiForm, count: e.target.value })} placeholder="留空由 AI 拆分" /></label>
 	            <label className="wide">学习目标<input value={aiForm.learningGoal} onChange={(e) => setAiForm({ ...aiForm, learningGoal: e.target.value })} placeholder="例如：408 考试强化、长期记忆、面试速记" /></label>
 	            <div className="wide agent-options">
 	              <label className="switch-card">

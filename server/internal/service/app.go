@@ -941,6 +941,9 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 		if items, err := s.tryGenerateCardsWithExternalAI(request); err == nil && len(items) > 0 {
 			items = repairGeneratedCardsForPolicy(items, policy)
 			items = attachQualityReports(items, policy)
+			if budget, hasBudget := effectiveDocumentCardBudget(request, policy); hasBudget && len(items) > budget {
+				items = items[:budget]
+			}
 			return model.AIGenerateResponse{Items: items, Policy: &policy}
 		}
 	}
@@ -957,11 +960,8 @@ func (s *AppService) GenerateCards(request model.AIGenerateRequest) model.AIGene
 
 	facts := extractAtomicFacts(context, topic)
 	cardCount := effectiveAICardCount(request, facts, policy)
-	if cardCount > policy.MaxCardsTotal {
+	if policy.MaxCardsTotal > 0 && cardCount > policy.MaxCardsTotal {
 		cardCount = policy.MaxCardsTotal
-	}
-	if cardCount > 8 && !request.BatchMode {
-		cardCount = 8
 	}
 
 	templates := []struct {
@@ -1061,9 +1061,6 @@ func effectiveAICardCount(request model.AIGenerateRequest, facts []string, polic
 	}
 	if policy.MaxCardsTotal > 0 && count > policy.MaxCardsTotal {
 		count = policy.MaxCardsTotal
-	}
-	if !request.BatchMode && count > 8 {
-		count = 8
 	}
 	return count
 }
@@ -1297,26 +1294,36 @@ func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, 
 		}}
 	}
 
-	remaining := policy.MaxCardsTotal
-	if request.CardCount > 0 && request.CardCount < remaining {
-		remaining = request.CardCount
+	remaining, hasBudget := effectiveDocumentCardBudget(request, policy)
+	selectedChunks := chunks
+	if hasBudget {
+		selectedChunks = selectDocumentChunksForGeneration(chunks, remaining, policy)
 	}
-	selectedChunks := selectDocumentChunksForGeneration(chunks, remaining, policy)
-	items := make([]model.AIGeneratedCard, 0, remaining)
+	capacity := len(selectedChunks) * 3
+	if hasBudget {
+		capacity = remaining
+	}
+	items := make([]model.AIGeneratedCard, 0, capacity)
 	for chunkIndex, chunk := range selectedChunks {
-		if remaining <= 0 {
+		if hasBudget && remaining <= 0 {
 			break
 		}
 		chunkRequest := request
 		chunkRequest.Context = chunk.Text
 		chunkRequest.SourceName = firstNonEmpty(chunk.SourceLocation, chunk.HeadingPath, doc.Title)
-		remainingChunks := len(selectedChunks) - chunkIndex
-		chunkRequest.CardCount = int(math.Ceil(float64(remaining) / float64(remainingChunks)))
-		if policy.MaxCardsPerChunk > 0 && chunkRequest.CardCount > policy.MaxCardsPerChunk {
+		if hasBudget {
+			remainingChunks := len(selectedChunks) - chunkIndex
+			chunkRequest.CardCount = int(math.Ceil(float64(remaining) / float64(remainingChunks)))
+			if policy.MaxCardsPerChunk > 0 && chunkRequest.CardCount > policy.MaxCardsPerChunk {
+				chunkRequest.CardCount = policy.MaxCardsPerChunk
+			}
+			if chunkRequest.CardCount > remaining {
+				chunkRequest.CardCount = remaining
+			}
+		} else if policy.MaxCardsPerChunk > 0 {
 			chunkRequest.CardCount = policy.MaxCardsPerChunk
-		}
-		if chunkRequest.CardCount > remaining {
-			chunkRequest.CardCount = remaining
+		} else {
+			chunkRequest.CardCount = 0
 		}
 		chunkRequest.BatchMode = true
 		chunkResponse := s.GenerateCards(chunkRequest)
@@ -1328,8 +1335,10 @@ func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, 
 				item.SourceExcerpt = previewText(chunk.Text, 160)
 			}
 			items = append(items, item)
-			remaining--
-			if remaining <= 0 {
+			if hasBudget {
+				remaining--
+			}
+			if hasBudget && remaining <= 0 {
 				break
 			}
 		}
@@ -1347,6 +1356,20 @@ func (s *AppService) GenerateCardsFromDocument(request model.AIGenerateRequest, 
 		Images:      importedImagesFromExtracted(doc.Images),
 	}
 	return response
+}
+
+func effectiveDocumentCardBudget(request model.AIGenerateRequest, policy model.GenerationPolicy) (int, bool) {
+	if request.CardCount > 0 {
+		budget := request.CardCount
+		if policy.MaxCardsTotal > 0 && policy.MaxCardsTotal < budget {
+			budget = policy.MaxCardsTotal
+		}
+		return budget, true
+	}
+	if policy.MaxCardsTotal > 0 {
+		return policy.MaxCardsTotal, true
+	}
+	return 0, false
 }
 
 func importedImagesFromExtracted(images []extractedImage) []model.AIImportedImage {

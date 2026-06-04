@@ -21,8 +21,8 @@ func defaultGenerationPolicy() model.GenerationPolicy {
 		AllowMisconceptionCards: true,
 		SplitStrategy:           "by_heading",
 		CoverageMode:            "balanced",
-		MaxCardsPerChunk:        6,
-		MaxCardsTotal:           20,
+		MaxCardsPerChunk:        0,
+		MaxCardsTotal:           0,
 		RequireSourceExcerpt:    true,
 		RequireSourceLocation:   true,
 		DedupeLevel:             "medium",
@@ -38,14 +38,8 @@ func effectiveGenerationPolicy(request model.AIGenerateRequest) model.Generation
 	if len(request.CardTypes) > 0 && (request.Policy == nil || len(request.Policy.PreferredCardTypes) == 0) {
 		policy.PreferredCardTypes = compactStrings(request.CardTypes)
 	}
-	if policy.MaxCardsTotal <= 0 {
-		policy.MaxCardsTotal = 20
-	}
-	if request.CardCount > 0 && request.CardCount < policy.MaxCardsTotal {
+	if request.CardCount > 0 && policy.MaxCardsTotal > 0 && request.CardCount < policy.MaxCardsTotal {
 		policy.MaxCardsTotal = request.CardCount
-	}
-	if policy.MaxCardsPerChunk <= 0 {
-		policy.MaxCardsPerChunk = 6
 	}
 	if policy.MaxAnswerChars <= 0 {
 		policy.MaxAnswerChars = 80

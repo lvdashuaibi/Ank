@@ -1,5 +1,6 @@
 export type GenerationEstimateInput = {
   contextLength: number;
+  fileSize?: number;
   cardCount?: number;
   hasFile: boolean;
   allowWebSearch: boolean;
@@ -14,12 +15,14 @@ export type GenerationEstimate = {
 };
 
 export function estimateGeneration(input: GenerationEstimateInput): GenerationEstimate {
-  const requestedCards = input.cardCount && input.cardCount > 0 ? input.cardCount : 6;
-  let seconds = 8 + requestedCards * 2 + Math.ceil(Math.max(0, input.contextLength) / 420);
-  if (input.hasFile) seconds += 28;
-  if (input.allowWebSearch) seconds += 18;
-  if (input.examMode) seconds += 8;
-  seconds = Math.min(Math.max(seconds, 8), 180);
+  const sourceWeight = Math.max(0, input.contextLength) + (input.hasFile ? Math.min(input.fileSize || 8000, 120000) / 8 : 0);
+  const automaticCards = Math.max(input.hasFile ? 12 : 4, Math.ceil(sourceWeight / 520));
+  const requestedCards = input.cardCount && input.cardCount > 0 ? input.cardCount : automaticCards;
+  let seconds = 10 + requestedCards * 3 + Math.ceil(sourceWeight / 650);
+  if (input.hasFile) seconds += 35;
+  if (input.allowWebSearch) seconds += 25;
+  if (input.examMode) seconds += 10;
+  seconds = Math.min(Math.max(seconds, 8), 720);
 
   const shouldUseBackground = input.hasFile || input.allowWebSearch || seconds >= 45;
   return {
