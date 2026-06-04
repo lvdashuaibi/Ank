@@ -69,6 +69,8 @@ function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [selectedDrafts, setSelectedDrafts] = useState<Set<number>>(new Set());
+  const [selectedCardId, setSelectedCardId] = useState("");
+  const [previewDraftIndex, setPreviewDraftIndex] = useState<number | null>(null);
   const [selectedDeckId, setSelectedDeckId] = useState(
     () => localStorage.getItem("ank_deck_id") || "",
   );
@@ -97,6 +99,19 @@ function App() {
 
   const selectedDeck = decks.find((deck) => deck.id === selectedDeckId);
   const selectedDraftCount = selectedDrafts.size;
+  const selectedCard = cards.find((card) => card.id === selectedCardId) || cards[0];
+  const manualPreview = {
+    title: cardForm.title.trim() || "正在制作的新卡片",
+    front: cardForm.front.trim(),
+    back: cardForm.back.trim(),
+    tags: parseTags(cardForm.tags),
+    studyEnabled: cardForm.studyEnabled,
+    source: "manual" as const,
+  };
+  const draftPreview = previewDraftIndex === null ? null : draftToPreview(drafts[previewDraftIndex]);
+  const savedPreview = selectedCard ? cardToPreview(selectedCard) : null;
+  const hasManualPreview = Boolean(cardForm.title.trim() || cardForm.front.trim() || cardForm.back.trim());
+  const activePreview = hasManualPreview ? manualPreview : draftPreview || savedPreview;
 
   useEffect(() => {
     if (toast) {
@@ -155,13 +170,19 @@ function App() {
     if (nextSelected) await loadCards(nextSelected);
   }
 
-  async function loadCards(deckId = selectedDeckId) {
+  async function loadCards(deckId = selectedDeckId, preferredCardId = selectedCardId) {
     if (!deckId) {
       setCards([]);
+      setSelectedCardId("");
       return;
     }
     const body = await api<{ items: Card[] }>(`/decks/${deckId}/cards`);
-    setCards(body.items || []);
+    const nextCards = body.items || [];
+    setCards(nextCards);
+    const nextSelected = nextCards.some((card) => card.id === preferredCardId)
+      ? preferredCardId
+      : nextCards[0]?.id || "";
+    setSelectedCardId(nextSelected);
   }
 
   async function loadJobs() {
@@ -239,7 +260,7 @@ function App() {
     if (!selectedDeckId) return setToast("请先选择牌组");
     setBusy(true);
     try {
-      await api<Card>(`/decks/${selectedDeckId}/cards`, {
+      const card = await api<Card>(`/decks/${selectedDeckId}/cards`, {
         method: "POST",
         body: JSON.stringify({
           title: cardForm.title.trim(),
@@ -253,7 +274,8 @@ function App() {
         }),
       });
       setCardForm({ title: "", front: "", back: "", tags: "", studyEnabled: true });
-      await loadCards();
+      setPreviewDraftIndex(null);
+      await loadCards(selectedDeckId, card.id);
       setToast("卡片已保存");
     } catch (error) {
       setToast(String(error instanceof Error ? error.message : error));
@@ -313,9 +335,10 @@ function App() {
     if (indexes.length === 0) return setToast("请选择要保存的草稿");
     setBusy(true);
     try {
+      let firstSavedCardId = "";
       for (const index of indexes) {
         const draft = drafts[index];
-        await api<Card>(`/decks/${selectedDeckId}/cards`, {
+        const card = await api<Card>(`/decks/${selectedDeckId}/cards`, {
           method: "POST",
           body: JSON.stringify({
             title: draft.title || `AI 草稿 ${index + 1}`,
@@ -328,10 +351,12 @@ function App() {
             study_enabled: true,
           }),
         });
+        if (!firstSavedCardId) firstSavedCardId = card.id;
       }
       setDrafts((current) => current.filter((_, index) => !indexes.includes(index)));
       setSelectedDrafts(new Set());
-      await loadCards();
+      setPreviewDraftIndex(null);
+      await loadCards(selectedDeckId, firstSavedCardId);
       setToast(`已保存 ${indexes.length} 张草稿`);
     } catch (error) {
       setToast(String(error instanceof Error ? error.message : error));
@@ -399,19 +424,36 @@ function App() {
           <div><strong>Ank</strong><span>Web Studio</span></div>
         </div>
         <button className="rail-action" onClick={() => void reloadAll()} disabled={busy}><RefreshCw size={17} />刷新</button>
-        <form onSubmit={createDeck} className="deck-create">
-          <input placeholder="新牌组名称" value={deckForm.name} onChange={(e) => setDeckForm({ ...deckForm, name: e.target.value })} required />
-          <textarea placeholder="说明，可选" rows={2} value={deckForm.description} onChange={(e) => setDeckForm({ ...deckForm, description: e.target.value })} />
-          <button disabled={busy}><CirclePlus size={17} />新建牌组</button>
-        </form>
-        <nav className="deck-list">
-          {decks.map((deck) => (
-            <button key={deck.id} className={deck.id === selectedDeckId ? "deck active" : "deck"} onClick={() => { setSelectedDeckId(deck.id); localStorage.setItem("ank_deck_id", deck.id); void loadCards(deck.id); }}>
-              <BookOpen size={18} />
-              <span><strong>{deck.name}</strong><small>{deck.description || "无说明"}</small></span>
-            </button>
-          ))}
-        </nav>
+        <section className="rail-section">
+          <div className="section-title"><h2>牌组</h2><span>{decks.length}</span></div>
+          <form onSubmit={createDeck} className="deck-create">
+            <input placeholder="新牌组名称" value={deckForm.name} onChange={(e) => setDeckForm({ ...deckForm, name: e.target.value })} required />
+            <textarea placeholder="说明，可选" rows={2} value={deckForm.description} onChange={(e) => setDeckForm({ ...deckForm, description: e.target.value })} />
+            <button disabled={busy}><CirclePlus size={17} />新建牌组</button>
+          </form>
+          <nav className="deck-list">
+            {decks.map((deck) => (
+              <button key={deck.id} className={deck.id === selectedDeckId ? "deck active" : "deck"} onClick={() => { setSelectedDeckId(deck.id); localStorage.setItem("ank_deck_id", deck.id); setPreviewDraftIndex(null); void loadCards(deck.id); }}>
+                <BookOpen size={18} />
+                <span><strong>{deck.name}</strong><small>{deck.description || "无说明"}</small></span>
+              </button>
+            ))}
+          </nav>
+        </section>
+        <section className="card-browser">
+          <div className="section-title"><h2>卡片列表</h2><span>{deckCards.length}</span></div>
+          <div className="card-list-nav">
+            {deckCards.length === 0 ? (
+              <div className="mini-empty">当前牌组还没有卡片，先在中间制作一张。</div>
+            ) : deckCards.map((card, index) => (
+              <button key={card.id} className={card.id === selectedCardId && previewDraftIndex === null ? "card-row active" : "card-row"} onClick={() => { setSelectedCardId(card.id); setPreviewDraftIndex(null); }}>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <strong>{card.title || card.front || "未命名卡片"}</strong>
+                <small>{card.back || answerOf(card.content) || "暂无答案"}</small>
+              </button>
+            ))}
+          </div>
+        </section>
         <div className="user-strip">
           <span>{user?.display_name || user?.email}</span>
           <button onClick={logout} title="退出"><LogOut size={17} /></button>
@@ -421,8 +463,9 @@ function App() {
       <section className="studio">
         <header className="topbar">
           <div>
-            <p className="eyebrow">AI Drafting</p>
-            <h1>{selectedDeck?.name || "选择一个牌组"}</h1>
+            <p className="eyebrow">Card Workshop</p>
+            <h1>制作卡片</h1>
+            <p className="subtle">当前牌组：{selectedDeck?.name || "请选择牌组"}</p>
           </div>
           <div className="metrics">
             <span><Layers3 size={16} />{decks.length} 牌组</span>
@@ -431,10 +474,10 @@ function App() {
           </div>
         </header>
 
-        <section className="ai-panel">
+        <section className="maker-panel ai-panel">
           <div className="panel-title">
             <Sparkles size={20} />
-            <div><h2>AI 制卡</h2><p>可以同步生成，也可以放到后台后再取回。</p></div>
+            <div><h2>AI 来做</h2><p>给材料、教材片段或文件，AI 会拆成符合 DSL 的草稿。</p></div>
           </div>
           <form onSubmit={generateDrafts} className="ai-grid">
             <label>主题<input value={aiForm.topic} onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })} placeholder="教育学原理：形成性评价" /></label>
@@ -444,6 +487,23 @@ function App() {
             <div className="wide actions-row">
               <button className="primary" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}生成草稿</button>
               <button type="button" className="secondary" onClick={() => void startBackgroundJob()} disabled={busy}><Cloud size={18} />后台生成</button>
+            </div>
+          </form>
+        </section>
+
+        <section className="maker-panel manual-card">
+          <div className="panel-title">
+            <Save size={20} />
+            <div><h2>手工制作</h2><p>适合快速补充、修正 AI 草稿，右侧会实时预览整张卡片。</p></div>
+          </div>
+          <form onSubmit={createCard} className="manual-grid">
+            <label>标题<input value={cardForm.title} onChange={(e) => { setCardForm({ ...cardForm, title: e.target.value }); setPreviewDraftIndex(null); }} placeholder="题目" required /></label>
+            <label className="wide">正面 / DSL<textarea rows={5} value={cardForm.front} onChange={(e) => { setCardForm({ ...cardForm, front: e.target.value }); setPreviewDraftIndex(null); }} required placeholder="{single-choice} 或普通问答正面" /></label>
+            <label className="wide">答案<textarea rows={4} value={cardForm.back} onChange={(e) => { setCardForm({ ...cardForm, back: e.target.value }); setPreviewDraftIndex(null); }} required placeholder="用于自评的标准答案" /></label>
+            <label>标签<input value={cardForm.tags} onChange={(e) => { setCardForm({ ...cardForm, tags: e.target.value }); setPreviewDraftIndex(null); }} placeholder="教育学, 考试" /></label>
+            <label className="inline"><input type="checkbox" checked={cardForm.studyEnabled} onChange={(e) => setCardForm({ ...cardForm, studyEnabled: e.target.checked })} />加入背诵</label>
+            <div className="wide actions-row">
+              <button className="primary" disabled={busy}><Save size={17} />保存卡片</button>
             </div>
           </form>
         </section>
@@ -470,8 +530,8 @@ function App() {
             {drafts.length === 0 ? (
               <div className="empty-state"><Sparkles size={28} /><strong>等待第一批 AI 草稿</strong><span>同步生成适合短材料；教材或 PDF 建议后台生成。</span></div>
             ) : drafts.map((draft, index) => (
-              <article key={`${draft.title}-${index}`} className={selectedDrafts.has(index) ? "draft selected" : "draft"}>
-                <label className="draft-check"><input type="checkbox" checked={selectedDrafts.has(index)} onChange={(e) => toggleDraft(index, e.target.checked, selectedDrafts, setSelectedDrafts)} />保存</label>
+              <article key={`${draft.title}-${index}`} className={previewDraftIndex === index ? "draft previewing" : selectedDrafts.has(index) ? "draft selected" : "draft"} onClick={() => { setPreviewDraftIndex(index); setSelectedCardId(""); }}>
+                <label className="draft-check" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedDrafts.has(index)} onChange={(e) => toggleDraft(index, e.target.checked, selectedDrafts, setSelectedDrafts)} />保存</label>
                 <h3>{draft.title || `草稿 ${index + 1}`}</h3>
                 <pre>{promptOf(draft.content || draft.front || "")}</pre>
                 <p>{draft.back || answerOf(draft.content || "")}</p>
@@ -482,27 +542,34 @@ function App() {
         </section>
       </section>
 
-      <aside className="inspector">
-        <section className="manual-card">
-          <h2>手工建卡</h2>
-          <form onSubmit={createCard}>
-            <label>标题<input value={cardForm.title} onChange={(e) => setCardForm({ ...cardForm, title: e.target.value })} placeholder="题目" required /></label>
-            <label>正面 / DSL<textarea rows={5} value={cardForm.front} onChange={(e) => setCardForm({ ...cardForm, front: e.target.value })} required /></label>
-            <label>答案<textarea rows={4} value={cardForm.back} onChange={(e) => setCardForm({ ...cardForm, back: e.target.value })} required /></label>
-            <label>标签<input value={cardForm.tags} onChange={(e) => setCardForm({ ...cardForm, tags: e.target.value })} placeholder="教育学, 考试" /></label>
-            <label className="inline"><input type="checkbox" checked={cardForm.studyEnabled} onChange={(e) => setCardForm({ ...cardForm, studyEnabled: e.target.checked })} />加入背诵</label>
-            <button className="primary" disabled={busy}><Save size={17} />保存卡片</button>
-          </form>
-        </section>
-        <section className="card-list">
-          <h2>当前卡片</h2>
-          {deckCards.slice(0, 12).map((card) => (
-            <article key={card.id} className="saved-card">
-              <strong>{card.title || card.front || "未命名卡片"}</strong>
-              <p>{card.back || answerOf(card.content)}</p>
-              <span>{card.study_enabled ? "已加入背诵" : "未加入背诵"}</span>
+      <aside className="preview-pane">
+        <section className="preview-card-shell">
+          <p className="eyebrow">Card Preview</p>
+          <h2>整张卡片预览</h2>
+          {activePreview ? (
+            <article className={`full-card ${activePreview.source}`}>
+              <div className="preview-kicker">{activePreview.source === "draft" ? "AI 草稿" : activePreview.source === "manual" ? "正在制作" : "已保存卡片"}</div>
+              <h3>{activePreview.title}</h3>
+              <div className="preview-block">
+                <span>正面</span>
+                <pre>{activePreview.front || "还没有填写正面内容"}</pre>
+              </div>
+              <div className="preview-block answer">
+                <span>答案</span>
+                <p>{activePreview.back || "还没有填写答案"}</p>
+              </div>
+              <div className="preview-footer">
+                <div className="tags">{activePreview.tags.length ? activePreview.tags.map((tag) => <span key={tag}>{tag}</span>) : <span>未设置标签</span>}</div>
+                <strong>{activePreview.studyEnabled ? "将加入背诵" : "仅保存，不背诵"}</strong>
+              </div>
             </article>
-          ))}
+          ) : (
+            <div className="preview-empty">
+              <Sparkles size={30} />
+              <strong>选择或制作一张卡片</strong>
+              <span>左侧点卡片，中间点 AI 草稿，或开始手工输入。</span>
+            </div>
+          )}
         </section>
       </aside>
       {toast && <div className="toast">{toast}</div>}
@@ -525,6 +592,29 @@ function composeContent(front: string, back: string) {
   const prompt = front.trim();
   const answer = back.trim();
   return answer ? `${prompt}\n\n@answer\n${answer}\n@end` : prompt;
+}
+
+function cardToPreview(card: Card) {
+  return {
+    title: card.title || card.front || "未命名卡片",
+    front: card.front || promptOf(card.content),
+    back: card.back || answerOf(card.content),
+    tags: card.tags || [],
+    studyEnabled: card.study_enabled,
+    source: "saved" as const,
+  };
+}
+
+function draftToPreview(draft?: Draft) {
+  if (!draft) return null;
+  return {
+    title: draft.title || "AI 草稿",
+    front: draft.front || promptOf(draft.content),
+    back: draft.back || answerOf(draft.content),
+    tags: draft.tags || ["AI生成"],
+    studyEnabled: true,
+    source: "draft" as const,
+  };
 }
 
 function promptOf(content = "") {

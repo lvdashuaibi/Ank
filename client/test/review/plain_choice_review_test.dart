@@ -80,7 +80,10 @@ B. 支持及时反馈
       studyEnabled: true,
       createdAt: DateTime(2026, 6, 3, 10),
       updatedAt: DateTime(2026, 6, 3, 10),
-      state: FsrsState(dueDate: DateTime(2026, 6, 4, 10), reps: 1),
+      state: FsrsState(
+        dueDate: DateTime.now().add(const Duration(days: 1)),
+        reps: 1,
+      ),
     );
     state = state.copyWith(cards: <CardModel>[updated], clearError: true);
     return updated;
