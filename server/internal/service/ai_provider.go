@@ -2,10 +2,13 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,6 +79,7 @@ func (s *AppService) tryGenerateCardsWithExternalAI(request model.AIGenerateRequ
 		UserPrompt:   prompt,
 		Context: aiAgentToolContext{
 			GenerateRequest: request,
+			Service:         s,
 		},
 	})
 	if err != nil {
@@ -154,7 +158,7 @@ func agentAutonomyPromptRules() string {
 		"- You choose the best card type yourself for each knowledge point. Do not follow rigid mappings such as definitions always being basic cards or formulas always being cloze cards.",
 		"- Tools are optional capabilities. Decide whether to retrieve source chunks, search the web, critique drafts, or directly create cards.",
 		"- If ExamMode is true, think like an exam coach: include common traps, misconceptions, confusing pairs, and scenario-transfer questions when useful.",
-		"- If web search is allowed, use it only when it can improve exam context, misconceptions, or missing background; mark web-enhanced cards with source_location or notes.",
+		"- If web search is allowed, use search_web to discover useful sources and read_web_page to inspect selected pages when deeper evidence is needed; mark web-enhanced cards with source_location or notes.",
 		"- If web search is not allowed, do not ask for or invent web evidence.",
 	}, "\n")
 }
@@ -195,6 +199,7 @@ func newAICardGenerationToolRegistry(request model.AIGenerateRequest) *aiAgentTo
 	_ = registry.Register(newAISourceRetrievalTool())
 	if request.AllowWebSearch {
 		_ = registry.Register(newAIWebSearchTool())
+		_ = registry.Register(newAIWebPageReaderTool())
 	}
 	_ = registry.Register(newAICritiqueCardsTool())
 	for _, tool := range []aiAgentTool{
@@ -254,13 +259,16 @@ func newAIWebSearchTool() aiAgentTool {
 			Type: "function",
 			Function: openAIFunctionSpec{
 				Name:        "search_web",
-				Description: "Search the web for exam context, common traps, misconceptions, or missing background. Only available when the user allows web search.",
+				Description: "Search the web through Brave Search for exam context, common traps, misconceptions, or missing background. Only available when the user allows web search.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"query":       map[string]any{"type": "string", "description": "Search query."},
 						"intent":      map[string]any{"type": "string", "description": "Why this search helps card generation."},
-						"max_results": map[string]any{"type": "integer", "description": "Maximum results to return."},
+						"max_results": map[string]any{"type": "integer", "description": "Maximum results to return. Defaults to 8 and is capped at 20."},
+						"country":     map[string]any{"type": "string", "description": "Brave country code. Defaults to CN."},
+						"search_lang": map[string]any{"type": "string", "description": "Brave search language. Defaults to zh."},
+						"freshness":   map[string]any{"type": "string", "description": "Optional freshness filter: pd, pw, pm, or py."},
 					},
 					"required":             []string{"query"},
 					"additionalProperties": false,
@@ -268,6 +276,29 @@ func newAIWebSearchTool() aiAgentTool {
 			},
 		},
 		Execute: executeAIWebSearchTool,
+	}
+}
+
+func newAIWebPageReaderTool() aiAgentTool {
+	return aiAgentTool{
+		Name: "read_web_page",
+		Spec: openAIChatTool{
+			Type: "function",
+			Function: openAIFunctionSpec{
+				Name:        "read_web_page",
+				Description: "Read a web page selected from search results through Jina Reader and return Markdown/text content for deeper evidence.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"url":       map[string]any{"type": "string", "description": "Absolute http(s) URL to read."},
+						"max_chars": map[string]any{"type": "integer", "description": "Maximum characters to return."},
+					},
+					"required":             []string{"url"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		Execute: executeAIWebPageReaderTool,
 	}
 }
 
@@ -387,6 +418,15 @@ type aiWebSearchArgs struct {
 	Query      string `json:"query"`
 	Intent     string `json:"intent"`
 	MaxResults int    `json:"max_results"`
+	Count      int    `json:"count"`
+	Country    string `json:"country"`
+	SearchLang string `json:"search_lang"`
+	Freshness  string `json:"freshness"`
+}
+
+type aiWebPageReadArgs struct {
+	URL      string `json:"url"`
+	MaxChars int    `json:"max_chars"`
 }
 
 type aiCritiqueCardsArgs struct {
@@ -416,17 +456,32 @@ func executeAIWebSearchTool(ctx aiAgentToolContext, arguments json.RawMessage) (
 	if err := json.Unmarshal(arguments, &args); err != nil {
 		return aiAgentToolResult{}, err
 	}
-	results, err := performAgentWebSearch(args.Query, args.MaxResults)
+	if ctx.Service == nil {
+		return aiAgentToolResult{}, fmt.Errorf("web search service is unavailable")
+	}
+	content, err := ctx.Service.performCachedBraveSearch(context.Background(), args)
 	if err != nil {
 		return aiAgentToolResult{}, err
 	}
-	return aiAgentToolResult{
-		Content: toolResultJSON(map[string]any{
-			"ok":      true,
-			"intent":  strings.TrimSpace(args.Intent),
-			"results": results,
-		}),
-	}, nil
+	return aiAgentToolResult{Content: content}, nil
+}
+
+func executeAIWebPageReaderTool(ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
+	if !ctx.GenerateRequest.AllowWebSearch {
+		return aiAgentToolResult{}, fmt.Errorf("web page reading is not allowed for this request")
+	}
+	var args aiWebPageReadArgs
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return aiAgentToolResult{}, err
+	}
+	if ctx.Service == nil {
+		return aiAgentToolResult{}, fmt.Errorf("web page reader service is unavailable")
+	}
+	content, err := ctx.Service.performCachedJinaRead(context.Background(), args)
+	if err != nil {
+		return aiAgentToolResult{}, err
+	}
+	return aiAgentToolResult{Content: content}, nil
 }
 
 func executeAICritiqueCardsTool(ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
@@ -623,66 +678,243 @@ func splitSourceIntoChunks(source string) []string {
 	return chunks
 }
 
-func performAgentWebSearch(query string, maxResults int) ([]map[string]string, error) {
-	query = strings.TrimSpace(query)
+const (
+	aiWebSearchCacheTTL = 6 * time.Hour
+	aiWebReadCacheTTL   = 24 * time.Hour
+)
+
+func (s *AppService) performCachedBraveSearch(ctx context.Context, args aiWebSearchArgs) (string, error) {
+	query := strings.TrimSpace(args.Query)
 	if query == "" {
-		return nil, fmt.Errorf("search query is required")
+		return "", fmt.Errorf("search query is required")
 	}
-	if maxResults <= 0 || maxResults > 5 {
-		maxResults = 3
+	count := normalizeBraveResultCount(args)
+	country := firstNonEmpty(strings.TrimSpace(args.Country), strings.TrimSpace(s.config.BraveCountry), "CN")
+	searchLang := firstNonEmpty(strings.TrimSpace(args.SearchLang), strings.TrimSpace(s.config.BraveSearchLang), "zh")
+	freshness := normalizeBraveFreshness(args.Freshness)
+	cacheKey := aiCacheKey("brave-search", query, strconv.Itoa(count), country, searchLang, freshness)
+	if s.cache != nil {
+		if cached, ok := s.cache.Get(ctx, cacheKey); ok {
+			return cached, nil
+		}
 	}
-	endpoint := "https://api.duckduckgo.com/?q=" + url.QueryEscape(query) + "&format=json&no_html=1&skip_disambig=1"
-	client := &http.Client{Timeout: 12 * time.Second}
-	resp, err := client.Get(endpoint)
+
+	results, err := s.performBraveSearch(ctx, query, count, country, searchLang, freshness)
+	if err != nil {
+		return "", err
+	}
+	content := toolResultJSON(map[string]any{
+		"ok":           true,
+		"intent":       strings.TrimSpace(args.Intent),
+		"provider":     "brave",
+		"query":        query,
+		"country":      country,
+		"search_lang":  searchLang,
+		"freshness":    freshness,
+		"next_tool":    "read_web_page",
+		"next_hint":    "Call read_web_page with a result URL when source details are important.",
+		"results":      results,
+		"cached_until": time.Now().Add(aiWebSearchCacheTTL).Format(time.RFC3339),
+	})
+	if s.cache != nil {
+		s.cache.Set(ctx, cacheKey, content, aiWebSearchCacheTTL)
+	}
+	return content, nil
+}
+
+func (s *AppService) performBraveSearch(ctx context.Context, query string, count int, country string, searchLang string, freshness string) ([]map[string]string, error) {
+	if s.config == nil || strings.TrimSpace(s.config.BraveAPIKey) == "" {
+		return nil, fmt.Errorf("Brave Search API key is not configured")
+	}
+	endpoint := firstNonEmpty(strings.TrimSpace(s.config.BraveSearchURL), "https://api.search.brave.com/res/v1/web/search")
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	values := parsed.Query()
+	values.Set("q", query)
+	values.Set("count", strconv.Itoa(count))
+	values.Set("country", country)
+	values.Set("search_lang", searchLang)
+	values.Set("result_filter", "web")
+	if freshness != "" {
+		values.Set("freshness", freshness)
+	}
+	parsed.RawQuery = values.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Subscription-Token", s.config.BraveAPIKey)
+	req.Header.Set("Accept", "application/json")
+
+	client := s.aiWebHTTPClient(12 * time.Second)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("web search returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("Brave Search returned status %d", resp.StatusCode)
 	}
 	var body struct {
-		AbstractText  string `json:"AbstractText"`
-		AbstractURL   string `json:"AbstractURL"`
-		Heading       string `json:"Heading"`
-		RelatedTopics []struct {
-			Text     string `json:"Text"`
-			FirstURL string `json:"FirstURL"`
-			Topics   []struct {
-				Text     string `json:"Text"`
-				FirstURL string `json:"FirstURL"`
-			} `json:"Topics"`
-		} `json:"RelatedTopics"`
+		Web struct {
+			Results []struct {
+				Title         string   `json:"title"`
+				URL           string   `json:"url"`
+				Description   string   `json:"description"`
+				ExtraSnippets []string `json:"extra_snippets"`
+			} `json:"results"`
+		} `json:"web"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
-	results := make([]map[string]string, 0, maxResults)
-	add := func(title, link, snippet string) {
-		if len(results) >= maxResults || strings.TrimSpace(snippet) == "" {
-			return
+	results := make([]map[string]string, 0, count)
+	for _, item := range body.Web.Results {
+		snippet := strings.TrimSpace(item.Description)
+		if snippet == "" && len(item.ExtraSnippets) > 0 {
+			snippet = strings.Join(compactStrings(item.ExtraSnippets), " ")
 		}
 		results = append(results, map[string]string{
-			"title":   firstNonEmpty(strings.TrimSpace(title), previewText(snippet, 40)),
-			"url":     strings.TrimSpace(link),
+			"title":   firstNonEmpty(strings.TrimSpace(item.Title), previewText(snippet, 40), query),
+			"url":     strings.TrimSpace(item.URL),
 			"snippet": previewText(snippet, 220),
 		})
-	}
-	add(body.Heading, body.AbstractURL, body.AbstractText)
-	for _, topic := range body.RelatedTopics {
-		add(topic.Text, topic.FirstURL, topic.Text)
-		for _, nested := range topic.Topics {
-			add(nested.Text, nested.FirstURL, nested.Text)
+		if len(results) >= count {
+			break
 		}
 	}
 	if len(results) == 0 {
 		results = append(results, map[string]string{
 			"title":   query,
 			"url":     "",
-			"snippet": "No direct instant-answer result was returned. Use the source document first and search again with a more specific query if needed.",
+			"snippet": "No Brave web result was returned. Use the source document first or search again with a more specific query.",
 		})
 	}
 	return results, nil
+}
+
+func (s *AppService) performCachedJinaRead(ctx context.Context, args aiWebPageReadArgs) (string, error) {
+	targetURL := strings.TrimSpace(args.URL)
+	if targetURL == "" {
+		return "", fmt.Errorf("url is required")
+	}
+	maxChars := args.MaxChars
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	if maxChars < 1000 {
+		maxChars = 1000
+	}
+	if maxChars > 30000 {
+		maxChars = 30000
+	}
+	cacheKey := aiCacheKey("jina-read", targetURL, strconv.Itoa(maxChars))
+	if s.cache != nil {
+		if cached, ok := s.cache.Get(ctx, cacheKey); ok {
+			return cached, nil
+		}
+	}
+
+	content, err := s.performJinaRead(ctx, targetURL, maxChars)
+	if err != nil {
+		return "", err
+	}
+	result := toolResultJSON(map[string]any{
+		"ok":           true,
+		"provider":     "jina",
+		"url":          targetURL,
+		"content":      content,
+		"cached_until": time.Now().Add(aiWebReadCacheTTL).Format(time.RFC3339),
+	})
+	if s.cache != nil {
+		s.cache.Set(ctx, cacheKey, result, aiWebReadCacheTTL)
+	}
+	return result, nil
+}
+
+func (s *AppService) performJinaRead(ctx context.Context, targetURL string, maxChars int) (string, error) {
+	if _, err := validateReadableWebURL(targetURL); err != nil {
+		return "", err
+	}
+	baseURL := "https://r.jina.ai"
+	if s.config != nil {
+		baseURL = firstNonEmpty(strings.TrimSpace(s.config.JinaReaderURL), baseURL)
+	}
+	endpoint := strings.TrimRight(baseURL, "/") + "/" + targetURL
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	if s.config != nil && strings.TrimSpace(s.config.JinaAPIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+s.config.JinaAPIKey)
+	}
+	client := s.aiWebHTTPClient(20 * time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("Jina Reader returned status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxChars*4)))
+	if err != nil {
+		return "", err
+	}
+	return previewText(string(data), maxChars), nil
+}
+
+func validateReadableWebURL(rawURL string) (*url.URL, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("only http(s) URLs can be read")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return nil, fmt.Errorf("url host is required")
+	}
+	return parsed, nil
+}
+
+func normalizeBraveResultCount(args aiWebSearchArgs) int {
+	count := args.MaxResults
+	if args.Count > 0 {
+		count = args.Count
+	}
+	if count <= 0 {
+		return 8
+	}
+	if count > 20 {
+		return 20
+	}
+	return count
+}
+
+func normalizeBraveFreshness(value string) string {
+	switch strings.TrimSpace(value) {
+	case "pd", "pw", "pm", "py":
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
+}
+
+func (s *AppService) aiWebHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if s != nil && s.config != nil && strings.TrimSpace(s.config.AIWebProxyURL) != "" {
+		if proxyURL, err := url.Parse(strings.TrimSpace(s.config.AIWebProxyURL)); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
 }
 
 func sourceTextCovers(source, candidate string) bool {

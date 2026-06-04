@@ -37,6 +37,7 @@ type AppService struct {
 	logger *zap.Logger
 	jwt    *appjwt.Manager
 	fsrs   *fsrs.Engine
+	cache  aiToolCache
 }
 
 func NewAppService(cfg config.Config, store repository.Store, logger *zap.Logger) *AppService {
@@ -46,6 +47,7 @@ func NewAppService(cfg config.Config, store repository.Store, logger *zap.Logger
 		logger: logger,
 		jwt:    appjwt.NewManager(cfg.JWTSecret),
 		fsrs:   fsrs.NewEngine(),
+		cache:  newAIToolCache(cfg, logger),
 	}
 }
 

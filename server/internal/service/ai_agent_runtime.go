@@ -10,6 +10,7 @@ import (
 
 type aiAgentToolContext struct {
 	GenerateRequest model.AIGenerateRequest
+	Service         *AppService
 }
 
 type aiAgentToolResult struct {
