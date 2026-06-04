@@ -170,6 +170,38 @@ h1, h2, h3, p { margin: 0; }
   display: grid;
   gap: 12px;
 }
+.agent-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.switch-card {
+  min-height: 92px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--ink);
+}
+.switch-card input {
+  width: auto;
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+.switch-card strong,
+.switch-card small {
+  display: block;
+}
+.switch-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.45;
+  font-weight: 520;
+}
 .deck-create button { background: #dce8e0; justify-content: flex-start; }
 .deck-list {
   display: grid;
@@ -548,6 +580,7 @@ h1, h2, h3, p { margin: 0; }
 
 @media (max-width: 1180px) {
   .app-shell { grid-template-columns: 250px minmax(0, 1fr); }
+  .agent-options { grid-template-columns: 1fr; }
   .preview-pane { grid-column: 1 / -1; position: static; height: auto; }
   .preview-card-shell { min-height: 0; }
 }

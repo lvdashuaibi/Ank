@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -66,12 +67,12 @@ func (s *AppService) tryGenerateCardsWithExternalAI(request model.AIGenerateRequ
 		MaxTurns:    4,
 		Temperature: 0.7,
 		ToolChoice:  "auto",
-		Tools:       newAICardGenerationToolRegistry(),
+		Tools:       newAICardGenerationToolRegistry(request),
 		Chat:        s.createAIChatCompletion,
 		Evaluator:   aiCardGenerationEvaluator{},
 	})
 	result, err := runtime.Run(aiAgentRunInput{
-		SystemPrompt: "You are a flashcard generation agent. Prefer calling the provided card creation tools for every card, then return JSON only in the format {\"items\":[...cards...]} without markdown fences. All choice cards must use the app's implemented Card DSL.",
+		SystemPrompt: "You are an autonomous flashcard generation agent. You lead the reasoning: choose useful tools only when they help, choose card types yourself, and create high-quality cards for the user's learning goal. Tools are capabilities, not a fixed pipeline. Product guardrails: respect web-search permission, keep source traceability, and use the provided card tools so final cards fit the app DSL. Return JSON only in the format {\"items\":[...cards...]} without markdown fences.",
 		UserPrompt:   prompt,
 		Context: aiAgentToolContext{
 			GenerateRequest: request,
@@ -117,7 +118,7 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 	facts := extractAtomicFacts(request.Context, request.Topic)
 	cardCountLine := fmt.Sprintf("CardCount: %d", effectiveAICardCount(request, facts, policy))
 	if request.CardCount <= 0 {
-		cardCountLine = fmt.Sprintf("CardCount: auto\nTargetCardRange: 3-%d\nInstruction: Choose the appropriate number of atomic cards based on source granularity; do not pad with duplicates.", effectiveAICardCount(request, facts, policy))
+		cardCountLine = fmt.Sprintf("CardCount: auto\nTargetCardRange: 3-%d\nInstruction: You choose the appropriate number of atomic cards based on the material and goal; do not pad with duplicates.", effectiveAICardCount(request, facts, policy))
 	}
 	cardTypes := strings.Join(policy.PreferredCardTypes, ", ")
 	if strings.TrimSpace(cardTypes) == "" {
@@ -128,26 +129,43 @@ func buildAIPrompt(request model.AIGenerateRequest) string {
 		strategy = "fsrs_friendly"
 	}
 	return fmt.Sprintf(
-		"Topic: %s\nSourceName: %s\nSource Document:\n%s\nDifficulty: %s\n%s\nAllowedCardTypes: %s\nStrategy: %s\nLanguage: zh-CN\n%s\n%s\n%s",
+		"Topic: %s\nSourceName: %s\nLearningGoal: %s\nSource Document:\n%s\nDifficulty: %s\n%s\nAllowedCardTypes: %s\nStrategy: %s\nAllowedWebSearch: %t\nExamMode: %t\nStrictSource: %t\nLanguage: zh-CN\n%s\n%s\n%s\n%s",
 		strings.TrimSpace(request.Topic),
 		strings.TrimSpace(request.SourceName),
+		strings.TrimSpace(request.LearningGoal),
 		strings.TrimSpace(request.Context),
 		strings.TrimSpace(request.Difficulty),
 		cardCountLine,
 		cardTypes,
 		strategy,
+		request.AllowWebSearch,
+		request.ExamMode,
+		effectiveStrictSource(request),
+		agentAutonomyPromptRules(),
 		sourceGroundingPromptRules(),
 		policyPromptRules(policy),
 		cardDSLPromptRules(),
 	)
 }
 
+func agentAutonomyPromptRules() string {
+	return strings.Join([]string{
+		"ModelAutonomy:",
+		"- You choose the best card type yourself for each knowledge point. Do not follow rigid mappings such as definitions always being basic cards or formulas always being cloze cards.",
+		"- Tools are optional capabilities. Decide whether to retrieve source chunks, search the web, critique drafts, or directly create cards.",
+		"- If ExamMode is true, think like an exam coach: include common traps, misconceptions, confusing pairs, and scenario-transfer questions when useful.",
+		"- If web search is allowed, use it only when it can improve exam context, misconceptions, or missing background; mark web-enhanced cards with source_location or notes.",
+		"- If web search is not allowed, do not ask for or invent web evidence.",
+	}, "\n")
+}
+
 func sourceGroundingPromptRules() string {
 	return strings.Join([]string{
 		"SourceGroundingRules:",
-		"- Only create cards from the Source Document above. Do not use outside knowledge, examples, prior chat context, Anki documentation, or generic app manuals.",
+		"- When StrictSource is true: Only create cards from the Source Document above. Do not use outside knowledge, examples, prior chat context, Anki documentation, or generic app manuals.",
+		"- When StrictSource is false and web search is allowed, you may add clearly source-labeled web-enhanced misconceptions or exam context.",
 		"- If SourceName or Topic mentions an exam/domain such as 408, every card must test that domain, not unrelated software behavior such as Anki default decks.",
-		"- Every tool call must include source_excerpt copied or tightly paraphrased from the Source Document.",
+		"- Every card creation tool call must include source_excerpt copied or tightly paraphrased from the Source Document or labeled web evidence.",
 		"- If the Source Document is empty or unrelated, return zero items with a warning instead of inventing cards.",
 		"- Prefer terms that literally appear in the Source Document. 题干、答案和选项必须能从原文找到依据。",
 	}, "\n")
@@ -172,8 +190,13 @@ func stripJSONFence(content string) string {
 	return strings.TrimSpace(content)
 }
 
-func newAICardGenerationToolRegistry() *aiAgentToolRegistry {
+func newAICardGenerationToolRegistry(request model.AIGenerateRequest) *aiAgentToolRegistry {
 	registry := newAIAgentToolRegistry()
+	_ = registry.Register(newAISourceRetrievalTool())
+	if request.AllowWebSearch {
+		_ = registry.Register(newAIWebSearchTool())
+	}
+	_ = registry.Register(newAICritiqueCardsTool())
 	for _, tool := range []aiAgentTool{
 		newAICardGenerationTool(
 			"create_basic_card",
@@ -199,6 +222,76 @@ func newAICardGenerationToolRegistry() *aiAgentToolRegistry {
 		_ = registry.Register(tool)
 	}
 	return registry
+}
+
+func newAISourceRetrievalTool() aiAgentTool {
+	return aiAgentTool{
+		Name: "retrieve_source_chunks",
+		Spec: openAIChatTool{
+			Type: "function",
+			Function: openAIFunctionSpec{
+				Name:        "retrieve_source_chunks",
+				Description: "Retrieve relevant chunks from the user's Source Document. Use this when you want more grounded evidence before deciding card content.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query":      map[string]any{"type": "string", "description": "What to look for in the Source Document."},
+						"max_chunks": map[string]any{"type": "integer", "description": "Maximum chunks to return."},
+					},
+					"required":             []string{"query"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		Execute: executeAISourceRetrievalTool,
+	}
+}
+
+func newAIWebSearchTool() aiAgentTool {
+	return aiAgentTool{
+		Name: "search_web",
+		Spec: openAIChatTool{
+			Type: "function",
+			Function: openAIFunctionSpec{
+				Name:        "search_web",
+				Description: "Search the web for exam context, common traps, misconceptions, or missing background. Only available when the user allows web search.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query":       map[string]any{"type": "string", "description": "Search query."},
+						"intent":      map[string]any{"type": "string", "description": "Why this search helps card generation."},
+						"max_results": map[string]any{"type": "integer", "description": "Maximum results to return."},
+					},
+					"required":             []string{"query"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		Execute: executeAIWebSearchTool,
+	}
+}
+
+func newAICritiqueCardsTool() aiAgentTool {
+	return aiAgentTool{
+		Name: "critique_cards",
+		Spec: openAIChatTool{
+			Type: "function",
+			Function: openAIFunctionSpec{
+				Name:        "critique_cards",
+				Description: "Critique planned or generated cards for learning value, DSL fit, exam usefulness, ambiguity, duplicates, and missing misconceptions.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"goal":  map[string]any{"type": "string", "description": "What quality dimension to critique."},
+						"cards": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+					},
+					"required":             []string{"goal"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		Execute: executeAICritiqueCardsTool,
+	}
 }
 
 func newAICardGenerationTool(name, description string, required []string) aiAgentTool {
@@ -285,6 +378,82 @@ type aiCardToolArgs struct {
 	Note           string   `json:"note"`
 }
 
+type aiSourceRetrievalArgs struct {
+	Query     string `json:"query"`
+	MaxChunks int    `json:"max_chunks"`
+}
+
+type aiWebSearchArgs struct {
+	Query      string `json:"query"`
+	Intent     string `json:"intent"`
+	MaxResults int    `json:"max_results"`
+}
+
+type aiCritiqueCardsArgs struct {
+	Goal  string                   `json:"goal"`
+	Cards []map[string]interface{} `json:"cards"`
+}
+
+func executeAISourceRetrievalTool(ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
+	var args aiSourceRetrievalArgs
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return aiAgentToolResult{}, err
+	}
+	chunks := retrieveSourceChunks(ctx.GenerateRequest.Context, args.Query, args.MaxChunks)
+	return aiAgentToolResult{
+		Content: toolResultJSON(map[string]any{
+			"ok":     true,
+			"chunks": chunks,
+		}),
+	}, nil
+}
+
+func executeAIWebSearchTool(ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
+	if !ctx.GenerateRequest.AllowWebSearch {
+		return aiAgentToolResult{}, fmt.Errorf("web search is not allowed for this request")
+	}
+	var args aiWebSearchArgs
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return aiAgentToolResult{}, err
+	}
+	results, err := performAgentWebSearch(args.Query, args.MaxResults)
+	if err != nil {
+		return aiAgentToolResult{}, err
+	}
+	return aiAgentToolResult{
+		Content: toolResultJSON(map[string]any{
+			"ok":      true,
+			"intent":  strings.TrimSpace(args.Intent),
+			"results": results,
+		}),
+	}, nil
+}
+
+func executeAICritiqueCardsTool(ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
+	var args aiCritiqueCardsArgs
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return aiAgentToolResult{}, err
+	}
+	notes := []string{
+		"Prefer the most effective card type for each knowledge point; do not force all cards into one type.",
+		"Choice cards should contain plausible distractors and a concise explanation in @answer.",
+		"Cards should test one atomic idea and remain self-checkable.",
+	}
+	if ctx.GenerateRequest.ExamMode {
+		notes = append(notes, "Exam mode is enabled: add traps, confusing pairs, and scenario transfer when they improve learning.")
+	}
+	if effectiveStrictSource(ctx.GenerateRequest) {
+		notes = append(notes, "Strict source is enabled: every generated card must be grounded in the Source Document.")
+	}
+	return aiAgentToolResult{
+		Content: toolResultJSON(map[string]any{
+			"ok":    true,
+			"goal":  strings.TrimSpace(args.Goal),
+			"notes": notes,
+		}),
+	}, nil
+}
+
 func executeAICardGenerationTool(toolName string, ctx aiAgentToolContext, arguments json.RawMessage) (aiAgentToolResult, error) {
 	var args aiCardToolArgs
 	if err := json.Unmarshal(arguments, &args); err != nil {
@@ -344,6 +513,11 @@ func validateSourceGrounding(request model.AIGenerateRequest, args aiCardToolArg
 	if excerpt == "" {
 		return fmt.Errorf("source_excerpt is required when Source Document is provided")
 	}
+	if !effectiveStrictSource(request) && request.AllowWebSearch {
+		if sourceTextCovers(context, excerpt) || strings.TrimSpace(args.SourceLocation) != "" {
+			return nil
+		}
+	}
 	if sourceTextCovers(context, excerpt) {
 		return nil
 	}
@@ -360,6 +534,155 @@ func validateSourceGrounding(request model.AIGenerateRequest, args aiCardToolArg
 		return nil
 	}
 	return fmt.Errorf("source_excerpt is not grounded in Source Document")
+}
+
+func effectiveStrictSource(request model.AIGenerateRequest) bool {
+	if request.AllowWebSearch && !request.StrictSource {
+		return false
+	}
+	if request.StrictSource {
+		return true
+	}
+	return strings.TrimSpace(request.Context) != ""
+}
+
+func retrieveSourceChunks(source, query string, maxChunks int) []map[string]any {
+	if maxChunks <= 0 || maxChunks > 8 {
+		maxChunks = 4
+	}
+	facts := extractAtomicFacts(source, query)
+	if len(facts) == 0 && strings.TrimSpace(source) != "" {
+		facts = splitSourceIntoChunks(source)
+	}
+	queryTokens := significantTokens(query)
+	type scoredChunk struct {
+		text  string
+		score int
+		index int
+	}
+	scored := make([]scoredChunk, 0, len(facts))
+	for index, fact := range facts {
+		score := 0
+		factTokens := significantTokens(fact)
+		for token := range queryTokens {
+			if _, ok := factTokens[token]; ok {
+				score++
+			}
+		}
+		scored = append(scored, scoredChunk{text: fact, score: score, index: index})
+	}
+	for i := 0; i < len(scored); i++ {
+		for j := i + 1; j < len(scored); j++ {
+			if scored[j].score > scored[i].score || (scored[j].score == scored[i].score && scored[j].index < scored[i].index) {
+				scored[i], scored[j] = scored[j], scored[i]
+			}
+		}
+	}
+	out := make([]map[string]any, 0, maxChunks)
+	for _, chunk := range scored {
+		if strings.TrimSpace(chunk.text) == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"text":  previewText(chunk.text, 500),
+			"score": chunk.score,
+			"index": chunk.index,
+		})
+		if len(out) >= maxChunks {
+			break
+		}
+	}
+	return out
+}
+
+func splitSourceIntoChunks(source string) []string {
+	lines := strings.Split(source, "\n")
+	chunks := make([]string, 0)
+	var current strings.Builder
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if strings.TrimSpace(current.String()) != "" {
+				chunks = append(chunks, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			continue
+		}
+		if current.Len() > 0 {
+			current.WriteString(" ")
+		}
+		current.WriteString(line)
+		if len([]rune(current.String())) >= 360 {
+			chunks = append(chunks, strings.TrimSpace(current.String()))
+			current.Reset()
+		}
+	}
+	if strings.TrimSpace(current.String()) != "" {
+		chunks = append(chunks, strings.TrimSpace(current.String()))
+	}
+	return chunks
+}
+
+func performAgentWebSearch(query string, maxResults int) ([]map[string]string, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("search query is required")
+	}
+	if maxResults <= 0 || maxResults > 5 {
+		maxResults = 3
+	}
+	endpoint := "https://api.duckduckgo.com/?q=" + url.QueryEscape(query) + "&format=json&no_html=1&skip_disambig=1"
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("web search returned status %d", resp.StatusCode)
+	}
+	var body struct {
+		AbstractText  string `json:"AbstractText"`
+		AbstractURL   string `json:"AbstractURL"`
+		Heading       string `json:"Heading"`
+		RelatedTopics []struct {
+			Text     string `json:"Text"`
+			FirstURL string `json:"FirstURL"`
+			Topics   []struct {
+				Text     string `json:"Text"`
+				FirstURL string `json:"FirstURL"`
+			} `json:"Topics"`
+		} `json:"RelatedTopics"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	results := make([]map[string]string, 0, maxResults)
+	add := func(title, link, snippet string) {
+		if len(results) >= maxResults || strings.TrimSpace(snippet) == "" {
+			return
+		}
+		results = append(results, map[string]string{
+			"title":   firstNonEmpty(strings.TrimSpace(title), previewText(snippet, 40)),
+			"url":     strings.TrimSpace(link),
+			"snippet": previewText(snippet, 220),
+		})
+	}
+	add(body.Heading, body.AbstractURL, body.AbstractText)
+	for _, topic := range body.RelatedTopics {
+		add(topic.Text, topic.FirstURL, topic.Text)
+		for _, nested := range topic.Topics {
+			add(nested.Text, nested.FirstURL, nested.Text)
+		}
+	}
+	if len(results) == 0 {
+		results = append(results, map[string]string{
+			"title":   query,
+			"url":     "",
+			"snippet": "No direct instant-answer result was returned. Use the source document first and search again with a more specific query if needed.",
+		})
+	}
+	return results, nil
 }
 
 func sourceTextCovers(source, candidate string) bool {

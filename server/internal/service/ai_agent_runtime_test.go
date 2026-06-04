@@ -147,7 +147,7 @@ func TestAIAgentToolRegistryRejectsDuplicateAndUnknownTools(t *testing.T) {
 }
 
 func TestAICardGenerationToolRejectsOffSourceExcerpt(t *testing.T) {
-	registry := newAICardGenerationToolRegistry()
+	registry := newAICardGenerationToolRegistry(model.AIGenerateRequest{})
 	_, err := registry.Execute(openAIToolCall{
 		ID: "call-off-source",
 		Function: openAIToolFunction{
@@ -188,6 +188,65 @@ func TestBuildAIPromptRequiresSourceGroundingForDocuments(t *testing.T) {
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected prompt to contain %q, got:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildAIPromptTrustsModelWithMinimalGuardrails(t *testing.T) {
+	prompt := buildAIPrompt(model.AIGenerateRequest{
+		Topic:          "408 计算机组成原理 Cache",
+		Context:        "Cache 命中率会影响平均访存时间。",
+		AllowWebSearch: true,
+		ExamMode:       true,
+		StrictSource:   false,
+		LearningGoal:   "考试强化",
+	})
+
+	for _, want := range []string{
+		"ModelAutonomy",
+		"choose the best card type yourself",
+		"Tools are optional capabilities",
+		"AllowedWebSearch: true",
+		"ExamMode: true",
+		"StrictSource: false",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prompt to contain %q, got:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "定义必须") || strings.Contains(prompt, "公式必须") {
+		t.Fatalf("expected prompt to avoid rigid card-type mapping, got:\n%s", prompt)
+	}
+}
+
+func TestAutonomousAgentToolRegistryExposesResearchToolsWhenAllowed(t *testing.T) {
+	registry := newAICardGenerationToolRegistry(model.AIGenerateRequest{
+		AllowWebSearch: true,
+		ExamMode:       true,
+	})
+	specs := registry.Specs()
+	names := make(map[string]struct{}, len(specs))
+	for _, spec := range specs {
+		names[spec.Function.Name] = struct{}{}
+	}
+	for _, want := range []string{
+		"retrieve_source_chunks",
+		"search_web",
+		"critique_cards",
+		"create_single_choice_card",
+		"create_multi_choice_card",
+	} {
+		if _, ok := names[want]; !ok {
+			t.Fatalf("expected registry to include %s, got %+v", want, names)
+		}
+	}
+}
+
+func TestAutonomousAgentToolRegistryHidesWebSearchWhenNotAllowed(t *testing.T) {
+	registry := newAICardGenerationToolRegistry(model.AIGenerateRequest{})
+	for _, spec := range registry.Specs() {
+		if spec.Function.Name == "search_web" {
+			t.Fatalf("expected search_web tool to require explicit permission")
 		}
 	}
 }

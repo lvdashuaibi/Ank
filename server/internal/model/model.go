@@ -109,16 +109,20 @@ type SyncPullResponse struct {
 }
 
 type AIGenerateRequest struct {
-	Topic      string            `json:"topic"`
-	Context    string            `json:"context"`
-	CardCount  int               `json:"card_count"`
-	Difficulty string            `json:"difficulty"`
-	CardTypes  []string          `json:"card_types,omitempty"`
-	Strategy   string            `json:"strategy,omitempty"`
-	SourceName string            `json:"source_name,omitempty"`
-	PolicyID   string            `json:"policy_id,omitempty"`
-	Policy     *GenerationPolicy `json:"policy,omitempty"`
-	BatchMode  bool              `json:"batch_mode,omitempty"`
+	Topic          string            `json:"topic"`
+	Context        string            `json:"context"`
+	CardCount      int               `json:"card_count"`
+	Difficulty     string            `json:"difficulty"`
+	CardTypes      []string          `json:"card_types,omitempty"`
+	Strategy       string            `json:"strategy,omitempty"`
+	SourceName     string            `json:"source_name,omitempty"`
+	LearningGoal   string            `json:"learning_goal,omitempty"`
+	AllowWebSearch bool              `json:"allow_web_search,omitempty"`
+	ExamMode       bool              `json:"exam_mode,omitempty"`
+	StrictSource   bool              `json:"strict_source,omitempty"`
+	PolicyID       string            `json:"policy_id,omitempty"`
+	Policy         *GenerationPolicy `json:"policy,omitempty"`
+	BatchMode      bool              `json:"batch_mode,omitempty"`
 }
 
 type AIGeneratedCard struct {

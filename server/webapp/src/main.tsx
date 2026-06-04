@@ -106,6 +106,10 @@ function App() {
     topic: "",
     context: "",
     count: "",
+    learningGoal: "理解并长期记忆",
+    allowWebSearch: false,
+    examMode: false,
+    strictSource: true,
   });
   const [file, setFile] = useState<File | null>(null);
 
@@ -327,14 +331,18 @@ function App() {
   async function startBackgroundJob() {
     setBusy(true);
     try {
-      if (file) {
-        const form = new FormData();
-        form.append("file", file);
-        form.append("topic", aiForm.topic.trim() || selectedDeck?.name || "AI 制卡");
-        if (aiForm.count.trim()) form.append("card_count", aiForm.count.trim());
-        form.append("difficulty", "medium");
-        form.append("card_types", "basic,single_choice,multi_choice,cloze");
-        form.append("policy_json", JSON.stringify(policyPayload()));
+	      if (file) {
+	        const form = new FormData();
+	        form.append("file", file);
+	        form.append("topic", aiForm.topic.trim() || selectedDeck?.name || "AI 制卡");
+	        if (aiForm.count.trim()) form.append("card_count", aiForm.count.trim());
+	        form.append("difficulty", "medium");
+	        form.append("card_types", "basic,single_choice,multi_choice,cloze");
+	        form.append("learning_goal", aiForm.learningGoal.trim());
+	        form.append("allow_web_search", String(aiForm.allowWebSearch));
+	        form.append("exam_mode", String(aiForm.examMode));
+	        form.append("strict_source", String(aiForm.strictSource));
+	        form.append("policy_json", JSON.stringify(policyPayload()));
         await api<Job>("/ai/import-file-job", { method: "POST", body: form });
       } else {
         await api<Job>("/ai/generate-jobs", {
@@ -387,15 +395,19 @@ function App() {
     }
   }
 
-  function aiPayload() {
-    return {
-      topic: aiForm.topic.trim() || selectedDeck?.name || "AI 制卡",
-      context: aiForm.context.trim(),
-      ...(Number(aiForm.count || 0) > 0 ? { card_count: Number(aiForm.count) } : {}),
-      difficulty: "medium",
-      policy: policyPayload(),
-    };
-  }
+	  function aiPayload() {
+	    return {
+	      topic: aiForm.topic.trim() || selectedDeck?.name || "AI 制卡",
+	      context: aiForm.context.trim(),
+	      ...(Number(aiForm.count || 0) > 0 ? { card_count: Number(aiForm.count) } : {}),
+	      difficulty: "medium",
+	      learning_goal: aiForm.learningGoal.trim(),
+	      allow_web_search: aiForm.allowWebSearch,
+	      exam_mode: aiForm.examMode,
+	      strict_source: aiForm.strictSource,
+	      policy: policyPayload(),
+	    };
+	  }
 
   function policyPayload() {
     return {
@@ -406,10 +418,10 @@ function App() {
       preferred_card_types: ["basic", "cloze", "single_choice", "multi_choice"],
       split_strategy: "by_heading",
       coverage_mode: "balanced",
-      max_cards_total: 16,
-      max_cards_per_chunk: 5,
-      custom_rules: "题干聚焦单一知识点；选择题必须使用 Ank DSL；答案短、可自评。",
-    };
+	      max_cards_total: 16,
+	      max_cards_per_chunk: 5,
+	      custom_rules: "模型自主选择题型；题干聚焦单一知识点；选择题必须使用 Ank DSL；答案短、可自评。",
+	    };
   }
 
   function updateCardForm(patch: Partial<typeof cardForm>) {
@@ -514,15 +526,30 @@ function App() {
           </div>
         </header>
 
-        <section className="maker-panel ai-panel">
-          <div className="panel-title">
-            <Sparkles size={20} />
-            <div><h2>AI 来做</h2><p>给材料、教材片段或文件，AI 会严格从来源内容中拆成草稿。</p></div>
-          </div>
-          <form onSubmit={generateDrafts} className="ai-grid">
-            <label>主题<input value={aiForm.topic} onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })} placeholder="教育学原理：形成性评价" /></label>
-            <label>数量（可选）<input type="number" min={1} max={20} value={aiForm.count} onChange={(e) => setAiForm({ ...aiForm, count: e.target.value })} placeholder="留空自动拆分" /></label>
-            <label className="wide">材料 / 要求<textarea rows={5} value={aiForm.context} onChange={(e) => setAiForm({ ...aiForm, context: e.target.value })} placeholder="粘贴知识点、教材片段，或描述你想要的卡片。" /></label>
+	        <section className="maker-panel ai-panel">
+	          <div className="panel-title">
+	            <Sparkles size={20} />
+	            <div><h2>AI 来做</h2><p>给模型目标和材料，Agent 会自主选择题型；联网只在你允许时启用。</p></div>
+	          </div>
+	          <form onSubmit={generateDrafts} className="ai-grid">
+	            <label>主题<input value={aiForm.topic} onChange={(e) => setAiForm({ ...aiForm, topic: e.target.value })} placeholder="教育学原理：形成性评价" /></label>
+	            <label>数量（可选）<input type="number" min={1} max={20} value={aiForm.count} onChange={(e) => setAiForm({ ...aiForm, count: e.target.value })} placeholder="留空自动拆分" /></label>
+	            <label className="wide">学习目标<input value={aiForm.learningGoal} onChange={(e) => setAiForm({ ...aiForm, learningGoal: e.target.value })} placeholder="例如：408 考试强化、长期记忆、面试速记" /></label>
+	            <div className="wide agent-options">
+	              <label className="switch-card">
+	                <input type="checkbox" checked={aiForm.examMode} onChange={(e) => setAiForm({ ...aiForm, examMode: e.target.checked })} />
+	                <span><strong>考试强化</strong><small>让模型主动考虑易错点、混淆点和场景迁移。</small></span>
+	              </label>
+	              <label className="switch-card">
+	                <input type="checkbox" checked={aiForm.allowWebSearch} onChange={(e) => setAiForm({ ...aiForm, allowWebSearch: e.target.checked, strictSource: e.target.checked ? aiForm.strictSource : true })} />
+	                <span><strong>允许联网</strong><small>为考试背景、常见误区等提供搜索工具。</small></span>
+	              </label>
+	              <label className="switch-card">
+	                <input type="checkbox" checked={aiForm.strictSource} disabled={!aiForm.allowWebSearch} onChange={(e) => setAiForm({ ...aiForm, strictSource: e.target.checked })} />
+	                <span><strong>严格原文</strong><small>开启时只基于你的材料；关闭需同时允许联网。</small></span>
+	              </label>
+	            </div>
+	            <label className="wide">材料 / 要求<textarea rows={5} value={aiForm.context} onChange={(e) => setAiForm({ ...aiForm, context: e.target.value })} placeholder="粘贴知识点、教材片段，或描述你想要的卡片。" /></label>
             <label className="file-drop"><Upload size={18} />{file ? file.name : "可选：后台生成可读取 PDF / Markdown / TXT"}<input type="file" accept=".pdf,.md,.markdown,.txt" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
             <div className="wide actions-row">
               <button className="primary" disabled={busy}>{busy ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}生成草稿</button>

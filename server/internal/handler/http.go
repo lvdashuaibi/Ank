@@ -362,12 +362,16 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 		}
 		cardCount, _ := strconv.Atoi(c.PostForm("card_count"))
 		request := model.AIGenerateRequest{
-			Topic:      c.PostForm("topic"),
-			CardCount:  cardCount,
-			Difficulty: c.PostForm("difficulty"),
-			Strategy:   c.PostForm("strategy"),
-			CardTypes:  splitCSV(c.PostForm("card_types")),
-			PolicyID:   c.PostForm("policy_id"),
+			Topic:          c.PostForm("topic"),
+			CardCount:      cardCount,
+			Difficulty:     c.PostForm("difficulty"),
+			Strategy:       c.PostForm("strategy"),
+			CardTypes:      splitCSV(c.PostForm("card_types")),
+			PolicyID:       c.PostForm("policy_id"),
+			LearningGoal:   c.PostForm("learning_goal"),
+			AllowWebSearch: parsePostBool(c.PostForm("allow_web_search")),
+			ExamMode:       parsePostBool(c.PostForm("exam_mode")),
+			StrictSource:   parsePostBool(c.PostForm("strict_source")),
 		}
 		if rawPolicy := strings.TrimSpace(c.PostForm("policy_json")); rawPolicy != "" {
 			var policy model.GenerationPolicy
@@ -396,12 +400,16 @@ func NewRouter(cfg config.Config, services *service.AppService, logger *zap.Logg
 		}
 		cardCount, _ := strconv.Atoi(c.PostForm("card_count"))
 		request := model.AIGenerateRequest{
-			Topic:      c.PostForm("topic"),
-			CardCount:  cardCount,
-			Difficulty: c.PostForm("difficulty"),
-			Strategy:   c.PostForm("strategy"),
-			CardTypes:  splitCSV(c.PostForm("card_types")),
-			PolicyID:   c.PostForm("policy_id"),
+			Topic:          c.PostForm("topic"),
+			CardCount:      cardCount,
+			Difficulty:     c.PostForm("difficulty"),
+			Strategy:       c.PostForm("strategy"),
+			CardTypes:      splitCSV(c.PostForm("card_types")),
+			PolicyID:       c.PostForm("policy_id"),
+			LearningGoal:   c.PostForm("learning_goal"),
+			AllowWebSearch: parsePostBool(c.PostForm("allow_web_search")),
+			ExamMode:       parsePostBool(c.PostForm("exam_mode")),
+			StrictSource:   parsePostBool(c.PostForm("strict_source")),
 		}
 		if rawPolicy := strings.TrimSpace(c.PostForm("policy_json")); rawPolicy != "" {
 			var policy model.GenerationPolicy
@@ -494,6 +502,15 @@ func splitCSV(value string) []string {
 		}
 	}
 	return result
+}
+
+func parsePostBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func requestLogger(logger *zap.Logger) gin.HandlerFunc {
